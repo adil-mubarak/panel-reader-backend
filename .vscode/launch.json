@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Panel Reader backend",
+      "type": "go",
+      "request": "launch",
+      "mode": "exec",
+      "program": "${workspaceFolder}/storage/panel-reader-debug",
+      "cwd": "${workspaceFolder}/backend",
+      "preLaunchTask": "Build Panel Reader backend for debugging",
+      "env": {
+        "PANEL_READER_STORAGE": "${workspaceFolder}/storage",
+        "PANEL_READER_DATABASE": "${workspaceFolder}/storage/panel-reader.db"
+      },
+      "showLog": true,
+      "dlvFlags": ["--check-go-version=false"]
+    }
+  ]
+}
