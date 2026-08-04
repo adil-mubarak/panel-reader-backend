@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Panel Reader backend for debugging",
+      "type": "shell",
+      "command": "go",
+      "args": [
+        "build",
+        "-gcflags=panel-reader/backend/...=-N -l",
+        "-o",
+        "${workspaceFolder}/storage/panel-reader-debug",
+        "./cmd/server"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/backend"
+      },
+      "problemMatcher": ["$go"]
+    }
+  ]
+}
