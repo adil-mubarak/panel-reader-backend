@@ -1,0 +1,23 @@
+services:
+  panel-ai:
+    build:
+      context: ./ai-service
+    user: "${PANEL_AI_UID:-1000}:${PANEL_AI_GID:-1000}"
+    ports:
+      - "8090:8090"
+    environment:
+      PANEL_AI_PROVIDER: ${PANEL_AI_PROVIDER:-roboflow}
+      PANEL_MODEL_PATH: /models/comic-panel-seg.pt
+      PANEL_MODEL_VERSION: ${PANEL_MODEL_VERSION:-comic-panel-seg-v1}
+      PANEL_ALLOWED_IMAGE_ROOTS: /data
+      PANEL_CONFIDENCE: ${PANEL_CONFIDENCE:-0.25}
+      PANEL_IMAGE_SIZE: ${PANEL_IMAGE_SIZE:-1280}
+      PANEL_DEVICE: ${PANEL_DEVICE:-cpu}
+      ROBOFLOW_API_URL: ${ROBOFLOW_API_URL:-https://serverless.roboflow.com}
+      ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
+      ROBOFLOW_MODEL_ID: ${ROBOFLOW_MODEL_ID:-comic-panel-detectors/7}
+      ROBOFLOW_PANEL_CLASSES: ${ROBOFLOW_PANEL_CLASSES:-panel,panels}
+    volumes:
+      - ./storage:/data:ro
+      - ./models:/models:ro
+    restart: unless-stopped

@@ -30,18 +30,22 @@ import (
 )
 
 type Config struct {
-	StorageRoot  string
-	DatabasePath string
-	MaxUpload    int64
-	MaxEntries   int
-	MaxExtracted int64
-	MaxFile      int64
+	StorageRoot          string
+	DatabasePath         string
+	MaxUpload            int64
+	MaxEntries           int
+	MaxExtracted         int64
+	MaxFile              int64
+	PanelDetectorURL     string
+	PanelDetectorTimeout time.Duration
+	PanelDetectorRoot    string
 }
 
 type App struct {
-	config Config
-	db     *sql.DB
-	logger *slog.Logger
+	config     Config
+	db         *sql.DB
+	logger     *slog.Logger
+	httpClient *http.Client
 }
 
 type Comic struct {
@@ -91,6 +95,8 @@ type Panel struct {
 	Easing               string    `json:"easing"`
 	IsEnabled            bool      `json:"isEnabled"`
 	Source               string    `json:"source"`
+	Confidence           float64   `json:"confidence"`
+	ModelVersion         string    `json:"modelVersion"`
 	CreatedAt            time.Time `json:"createdAt"`
 	UpdatedAt            time.Time `json:"updatedAt"`
 }
@@ -126,7 +132,10 @@ func New(config Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	a := &App{config: config, db: db, logger: logger}
+	if config.PanelDetectorTimeout <= 0 {
+		config.PanelDetectorTimeout = 30 * time.Second
+	}
+	a := &App{config: config, db: db, logger: logger, httpClient: &http.Client{Timeout: config.PanelDetectorTimeout}}
 	if err := a.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -236,6 +245,8 @@ func (a *App) migrate() error {
 		{"is_enabled", `INTEGER NOT NULL DEFAULT 1`},
 		{"created_at", `TEXT NOT NULL DEFAULT ''`},
 		{"updated_at", `TEXT NOT NULL DEFAULT ''`},
+		{"confidence", `REAL NOT NULL DEFAULT 0`},
+		{"model_version", `TEXT NOT NULL DEFAULT ''`},
 	} {
 		if !panelColumns[addition.name] {
 			if _, err := a.db.Exec(`ALTER TABLE panels ADD COLUMN ` + addition.name + ` ` + addition.definition); err != nil {
@@ -326,9 +337,12 @@ func (a *App) Handler() http.Handler {
 	r.Post("/api/v1/comics", a.uploadComic)
 	r.Get("/api/v1/comics", a.listComics)
 	r.Get("/api/v1/comics/{comicID}", a.getComic)
+	r.Delete("/api/v1/comics/{comicID}", a.deleteComic)
 	r.Get("/api/v1/comics/{comicID}/progress", a.getProgress)
 	r.Put("/api/v1/comics/{comicID}/progress", a.putProgress)
 	r.Get("/api/v1/comics/{comicID}/pages", a.listPages)
+	r.Post("/api/v1/comics/{comicID}/detect", a.detectComic)
+	r.Post("/api/v1/comics/{comicID}/pages/{pageNumber}/detect", a.detectPage)
 	r.Put("/api/v1/comics/{comicID}/pages/{pageNumber}/panels", a.replacePanels)
 	r.Get("/api/v1/comics/{comicID}/pages/{pageNumber}/frames", a.getFrames)
 	r.Put("/api/v1/comics/{comicID}/pages/{pageNumber}/frames", a.replaceFrames)
@@ -417,6 +431,22 @@ func (a *App) processComic(id, extension, uploadPath string) {
 		a.failComic(id, err)
 		return
 	}
+	for i := range pages {
+		progress(90+4*(i+1)/len(pages), fmt.Sprintf("detecting panels on page %d of %d", i+1, len(pages)))
+		path, pathErr := temporaryPagePath(tmpDir, id, pages[i].path)
+		if pathErr != nil {
+			err = pathErr
+			break
+		}
+		pages[i].frames, err = a.detectPanelsFile(ctx, path, id, pages[i].Number, "ltr")
+		if err != nil {
+			break
+		}
+	}
+	if err != nil {
+		a.failComic(id, err)
+		return
+	}
 	progress(95, "publishing")
 	finalDir := filepath.Join(a.config.StorageRoot, "comics", id)
 	if err := os.Rename(tmpDir, finalDir); err != nil {
@@ -435,7 +465,7 @@ func (a *App) processComic(id, extension, uploadPath string) {
 			continue
 		}
 		pageID, err = result.LastInsertId()
-		for _, panel := range generatedPanels(page.Width, page.Height) {
+		for _, panel := range page.frames {
 			if err != nil {
 				break
 			}
@@ -470,6 +500,21 @@ func (a *App) failComic(id string, cause error) {
 type extractedPage struct {
 	Number, Width, Height int
 	MediaType, path       string
+	frames                []Panel
+}
+
+func temporaryPagePath(tmpDir, comicID, finalRelative string) (string, error) {
+	prefix := filepath.Join("comics", comicID) + string(filepath.Separator)
+	clean := filepath.Clean(finalRelative)
+	if !strings.HasPrefix(clean, prefix) {
+		return "", errors.New("invalid staged page path")
+	}
+	rel := strings.TrimPrefix(clean, prefix)
+	path := filepath.Join(tmpDir, rel)
+	if relative, err := filepath.Rel(tmpDir, path); err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("invalid staged page path")
+	}
+	return path, nil
 }
 
 func (a *App) extractCBZ(archivePath, destination, comicID string) ([]extractedPage, error) {
@@ -595,6 +640,28 @@ func (a *App) getComic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+func (a *App) deleteComic(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "comicID")
+	result, err := a.db.ExecContext(r.Context(), `DELETE FROM comics WHERE id=?`, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "Could not delete comic.")
+		return
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "Could not delete comic.")
+		return
+	}
+	if deleted == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "Comic not found.")
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(a.config.StorageRoot, "comics", id)); err != nil {
+		a.logger.Warn("remove deleted comic files", "comic_id", id, "error", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *App) comic(ctx context.Context, id string) (Comic, error) {
 	var c Comic
 	var created string
@@ -610,7 +677,7 @@ func (a *App) listPages(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "comicID")
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT p.number,p.width,p.height,p.media_type,p.revision,p.frame_setup_complete,
-		f.id,f.name,f."order",f.shape_type,f.frame_type,f.x,f.y,f.width,f.height,f.polygon_json,f.fit_mode,f.padding_percent,f.mask_opacity,f.transition_duration_ms,f.easing,f.is_enabled,f.source,f.created_at,f.updated_at
+		f.id,f.name,f."order",f.shape_type,f.frame_type,f.x,f.y,f.width,f.height,f.polygon_json,f.fit_mode,f.padding_percent,f.mask_opacity,f.transition_duration_ms,f.easing,f.is_enabled,f.source,f.confidence,f.model_version,f.created_at,f.updated_at
 		FROM pages p LEFT JOIN panels f ON f.page_id=p.id
 		WHERE p.comic_id=? ORDER BY p.number,f."order"`, id)
 	if err != nil {
@@ -625,10 +692,10 @@ func (a *App) listPages(w http.ResponseWriter, r *http.Request) {
 		var revision int
 		var setup bool
 		var panelID, panelOrder, transition sql.NullInt64
-		var name, shapeType, frameType, polygon, fitMode, easing, source, created, updated sql.NullString
-		var x, y, panelWidth, panelHeight, padding, opacity sql.NullFloat64
+		var name, shapeType, frameType, polygon, fitMode, easing, source, modelVersion, created, updated sql.NullString
+		var x, y, panelWidth, panelHeight, padding, opacity, confidence sql.NullFloat64
 		var enabled sql.NullBool
-		if err := rows.Scan(&number, &width, &height, &mediaType, &revision, &setup, &panelID, &name, &panelOrder, &shapeType, &frameType, &x, &y, &panelWidth, &panelHeight, &polygon, &fitMode, &padding, &opacity, &transition, &easing, &enabled, &source, &created, &updated); err != nil {
+		if err := rows.Scan(&number, &width, &height, &mediaType, &revision, &setup, &panelID, &name, &panelOrder, &shapeType, &frameType, &x, &y, &panelWidth, &panelHeight, &polygon, &fitMode, &padding, &opacity, &transition, &easing, &enabled, &source, &confidence, &modelVersion, &created, &updated); err != nil {
 			writeError(w, 500, "database_error", "Could not list pages.")
 			return
 		}
@@ -636,7 +703,7 @@ func (a *App) listPages(w http.ResponseWriter, r *http.Request) {
 			pages = append(pages, Page{Number: number, Width: width, Height: height, MediaType: mediaType, ImageURL: fmt.Sprintf("/api/v1/comics/%s/pages/%d/image", id, number), Panels: []Panel{}, Frames: []Panel{}, Revision: revision, FrameSetupComplete: setup})
 		}
 		if panelID.Valid {
-			frame := Panel{ID: panelID.Int64, Name: name.String, Order: int(panelOrder.Int64), ShapeType: shapeType.String, FrameType: frameType.String, X: x.Float64, Y: y.Float64, Width: panelWidth.Float64, Height: panelHeight.Float64, Polygon: []Point{}, FitMode: fitMode.String, PaddingPercent: padding.Float64, MaskOpacity: opacity.Float64, TransitionDurationMS: int(transition.Int64), Easing: easing.String, IsEnabled: enabled.Bool, Source: source.String}
+			frame := Panel{ID: panelID.Int64, Name: name.String, Order: int(panelOrder.Int64), ShapeType: shapeType.String, FrameType: frameType.String, X: x.Float64, Y: y.Float64, Width: panelWidth.Float64, Height: panelHeight.Float64, Polygon: []Point{}, FitMode: fitMode.String, PaddingPercent: padding.Float64, MaskOpacity: opacity.Float64, TransitionDurationMS: int(transition.Int64), Easing: easing.String, IsEnabled: enabled.Bool, Source: source.String, Confidence: confidence.Float64, ModelVersion: modelVersion.String}
 			_ = json.Unmarshal([]byte(polygon.String), &frame.Polygon)
 			frame.CreatedAt, _ = time.Parse(time.RFC3339Nano, created.String)
 			frame.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated.String)
@@ -681,7 +748,7 @@ type queryer interface {
 }
 
 func loadFrames(ctx context.Context, db queryer, pageID int64) ([]Panel, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id,name,"order",shape_type,frame_type,x,y,width,height,polygon_json,fit_mode,padding_percent,mask_opacity,transition_duration_ms,easing,is_enabled,source,created_at,updated_at FROM panels WHERE page_id=? ORDER BY "order",id`, pageID)
+	rows, err := db.QueryContext(ctx, `SELECT id,name,"order",shape_type,frame_type,x,y,width,height,polygon_json,fit_mode,padding_percent,mask_opacity,transition_duration_ms,easing,is_enabled,source,confidence,model_version,created_at,updated_at FROM panels WHERE page_id=? ORDER BY "order",id`, pageID)
 	if err != nil {
 		return nil, err
 	}
@@ -690,7 +757,7 @@ func loadFrames(ctx context.Context, db queryer, pageID int64) ([]Panel, error) 
 	for rows.Next() {
 		var frame Panel
 		var polygon, created, updated string
-		if err := rows.Scan(&frame.ID, &frame.Name, &frame.Order, &frame.ShapeType, &frame.FrameType, &frame.X, &frame.Y, &frame.Width, &frame.Height, &polygon, &frame.FitMode, &frame.PaddingPercent, &frame.MaskOpacity, &frame.TransitionDurationMS, &frame.Easing, &frame.IsEnabled, &frame.Source, &created, &updated); err != nil {
+		if err := rows.Scan(&frame.ID, &frame.Name, &frame.Order, &frame.ShapeType, &frame.FrameType, &frame.X, &frame.Y, &frame.Width, &frame.Height, &polygon, &frame.FitMode, &frame.PaddingPercent, &frame.MaskOpacity, &frame.TransitionDurationMS, &frame.Easing, &frame.IsEnabled, &frame.Source, &frame.Confidence, &frame.ModelVersion, &created, &updated); err != nil {
 			return nil, err
 		}
 		frame.Polygon = []Point{}
@@ -777,8 +844,11 @@ func validateFrames(frames []Panel) string {
 	orders := map[int]bool{}
 	for i := range frames {
 		f := &frames[i]
-		if f.Order < 1 || orders[f.Order] || len(f.Name) > 200 || !finite(f.X, f.Y, f.Width, f.Height, f.PaddingPercent, f.MaskOpacity) {
+		if f.Order < 1 || orders[f.Order] || len(f.Name) > 200 || len(f.ModelVersion) > 200 || !finite(f.X, f.Y, f.Width, f.Height, f.PaddingPercent, f.MaskOpacity, f.Confidence) {
 			return "Frame orders must be positive and unique and numeric values must be finite."
+		}
+		if f.Confidence < 0 || f.Confidence > 1 {
+			return "Frame confidence must be between 0 and 1."
 		}
 		orders[f.Order] = true
 		if f.IsEnabled {
@@ -836,7 +906,7 @@ func insertFrame(ctx context.Context, db execer, pageID int64, frame *Panel) err
 	if err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, `INSERT INTO panels(page_id,name,"order",shape_type,frame_type,x,y,width,height,polygon_json,fit_mode,padding_percent,mask_opacity,transition_duration_ms,easing,is_enabled,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, pageID, frame.Name, frame.Order, frame.ShapeType, frame.FrameType, frame.X, frame.Y, frame.Width, frame.Height, string(polygon), frame.FitMode, frame.PaddingPercent, frame.MaskOpacity, frame.TransitionDurationMS, frame.Easing, frame.IsEnabled, frame.Source, frame.CreatedAt.Format(time.RFC3339Nano), frame.UpdatedAt.Format(time.RFC3339Nano))
+	result, err := db.ExecContext(ctx, `INSERT INTO panels(page_id,name,"order",shape_type,frame_type,x,y,width,height,polygon_json,fit_mode,padding_percent,mask_opacity,transition_duration_ms,easing,is_enabled,source,confidence,model_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, pageID, frame.Name, frame.Order, frame.ShapeType, frame.FrameType, frame.X, frame.Y, frame.Width, frame.Height, string(polygon), frame.FitMode, frame.PaddingPercent, frame.MaskOpacity, frame.TransitionDurationMS, frame.Easing, frame.IsEnabled, frame.Source, frame.Confidence, frame.ModelVersion, frame.CreatedAt.Format(time.RFC3339Nano), frame.UpdatedAt.Format(time.RFC3339Nano))
 	if err == nil {
 		frame.ID, err = result.LastInsertId()
 	}
@@ -1157,7 +1227,7 @@ func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

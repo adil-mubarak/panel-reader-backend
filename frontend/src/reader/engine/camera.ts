@@ -16,6 +16,8 @@ export interface FocusFrame {
   easing: string;
   source: "detected" | "manual" | "manual_edited";
   isEnabled: boolean;
+  confidence?: number;
+  modelVersion?: string;
 }
 
 interface CameraInput {
@@ -87,6 +89,8 @@ export function defaultFrame(order: number, overrides: Partial<FocusFrame> = {})
     easing: "cubic-bezier(.22,.61,.36,1)",
     source: "manual",
     isEnabled: true,
+    confidence: undefined,
+    modelVersion: undefined,
     ...overrides,
   };
 }

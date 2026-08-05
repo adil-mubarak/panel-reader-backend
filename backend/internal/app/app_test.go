@@ -111,8 +111,8 @@ func TestUploadComicAndReadPages(t *testing.T) {
 	if len(pages) != 3 || pages[0].Number != 1 {
 		t.Fatalf("unexpected pages: %#v", pages)
 	}
-	if len(pages[0].Panels) < 2 || pages[0].Panels[0].Source != "detected" || pages[0].Panels[0].Order != 1 {
-		t.Fatalf("generated panels = %#v", pages[0].Panels)
+	if len(pages[0].Panels) != 1 || pages[0].Panels[0].Source != "detected" || pages[0].Panels[0].FrameType != "full_page" || pages[0].Panels[0].Order != 1 {
+		t.Fatalf("detected panels = %#v", pages[0].Panels)
 	}
 	for _, panel := range pages[0].Panels {
 		if panel.X < 0 || panel.Y < 0 || panel.Width <= 0 || panel.Height <= 0 || panel.X+panel.Width > 1 || panel.Y+panel.Height > 1 {
@@ -165,6 +165,31 @@ func TestUploadComicAndReadPages(t *testing.T) {
 	if invalidPolygonResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid polygon status = %d, body = %s", invalidPolygonResponse.Code, invalidPolygonResponse.Body.String())
 	}
+	detectConflict := httptest.NewRecorder()
+	a.Handler().ServeHTTP(detectConflict, httptest.NewRequest(http.MethodPost, "/api/v1/comics/"+comic.ID+"/pages/1/detect", nil))
+	if detectConflict.Code != http.StatusConflict {
+		t.Fatalf("manual detection status = %d, body = %s", detectConflict.Code, detectConflict.Body.String())
+	}
+	var preservedSource string
+	var preservedRevision int
+	if err := a.db.QueryRow(`SELECT f.source,p.revision FROM panels f JOIN pages p ON p.id=f.page_id WHERE p.comic_id=? AND p.number=1`, comic.ID).Scan(&preservedSource, &preservedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if preservedSource != "manual" || preservedRevision != 1 {
+		t.Fatalf("manual frame changed after conflict: source=%q revision=%d", preservedSource, preservedRevision)
+	}
+	detectReset := httptest.NewRecorder()
+	a.Handler().ServeHTTP(detectReset, httptest.NewRequest(http.MethodPost, "/api/v1/comics/"+comic.ID+"/pages/1/detect?reset=true", nil))
+	if detectReset.Code != http.StatusOK {
+		t.Fatalf("reset detection status = %d, body = %s", detectReset.Code, detectReset.Body.String())
+	}
+	var reset framesResponse
+	if err := json.Unmarshal(detectReset.Body.Bytes(), &reset); err != nil {
+		t.Fatal(err)
+	}
+	if reset.Revision != 2 || len(reset.Frames) != 1 || reset.Frames[0].Source != "detected" {
+		t.Fatalf("reset detection = %#v", reset)
+	}
 
 	imageResponse := httptest.NewRecorder()
 	a.Handler().ServeHTTP(imageResponse, httptest.NewRequest(http.MethodGet, "/api/v1/comics/"+comic.ID+"/pages/1/image", nil))
@@ -174,6 +199,67 @@ func TestUploadComicAndReadPages(t *testing.T) {
 	if imageResponse.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("content type = %q", imageResponse.Header().Get("Content-Type"))
 	}
+}
+
+func TestDetectPanelsFindsGridGutters(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 400, 300))
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 400; x++ {
+			img.Set(x, y, color.White)
+		}
+	}
+	regions := []image.Rectangle{
+		image.Rect(5, 5, 190, 140), image.Rect(210, 5, 395, 140),
+		image.Rect(5, 160, 190, 295), image.Rect(210, 160, 395, 295),
+	}
+	colors := []color.Color{color.Black, color.RGBA{R: 180, A: 255}, color.RGBA{G: 150, A: 255}, color.RGBA{B: 180, A: 255}}
+	for i, region := range regions {
+		for y := region.Min.Y; y < region.Max.Y; y++ {
+			for x := region.Min.X; x < region.Max.X; x++ {
+				img.Set(x, y, colors[i])
+			}
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	frames, err := detectPanels(t.Context(), bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 4 {
+		t.Fatalf("detected %d frames, want 4: %#v", len(frames), frames)
+	}
+	if !(frames[0].X < frames[1].X && frames[0].Y < frames[2].Y && frames[2].X < frames[3].X) {
+		t.Fatalf("frames are not in row-major LTR order: %#v", frames)
+	}
+}
+
+func TestDetectPanelsFallsBackWithoutGutter(t *testing.T) {
+	img := image.NewUniform(color.Black)
+	frames, err := detectPanels(t.Context(), imageReader(t, img, image.Rect(0, 0, 300, 400)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].FrameType != "full_page" || frames[0].Width != 1 || frames[0].Height != 1 {
+		t.Fatalf("fallback = %#v", frames)
+	}
+}
+
+func imageReader(t *testing.T, source image.Image, bounds image.Rectangle) io.Reader {
+	t.Helper()
+	img := image.NewRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			img.Set(x, y, source.At(x, y))
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.NewReader(encoded.Bytes())
 }
 
 func TestGeneratedPanelsFollowPageOrientation(t *testing.T) {

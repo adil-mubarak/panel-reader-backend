@@ -18,14 +18,18 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	storageRoot := envOr("PANEL_READER_STORAGE", "../storage")
 	databasePath := envOr("PANEL_READER_DATABASE", filepath.Join(storageRoot, "panel-reader.db"))
+	detectorTimeout := envDuration("PANEL_READER_AI_TIMEOUT", 30*time.Second, logger)
 
 	application, err := app.New(app.Config{
-		StorageRoot:  storageRoot,
-		DatabasePath: databasePath,
-		MaxUpload:    1 << 30,
-		MaxEntries:   2000,
-		MaxExtracted: 4 << 30,
-		MaxFile:      100 << 20,
+		StorageRoot:          storageRoot,
+		DatabasePath:         databasePath,
+		MaxUpload:            1 << 30,
+		MaxEntries:           2000,
+		MaxExtracted:         4 << 30,
+		MaxFile:              100 << 20,
+		PanelDetectorURL:     os.Getenv("PANEL_READER_AI_URL"),
+		PanelDetectorTimeout: detectorTimeout,
+		PanelDetectorRoot:    os.Getenv("PANEL_READER_AI_STORAGE_ROOT"),
 	}, logger)
 	if err != nil {
 		logger.Error("initialize application", "error", err)
@@ -58,6 +62,19 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown", "error", err)
 	}
+}
+
+func envDuration(name string, fallback time.Duration, logger *slog.Logger) time.Duration {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		logger.Warn("invalid duration environment variable", "name", name, "value", value)
+		return fallback
+	}
+	return duration
 }
 
 func envOr(name, fallback string) string {
