@@ -2365,3 +2365,338 @@ The architecture must remain simple enough for import formats, storage, frame de
 The core implementation rule is:
 
 > Keep the complete high-resolution page loaded, and move a virtual camera through an ordered collection of creator-defined normalized frames.
+
+---
+
+## 41. Current Implementation Status
+
+This section records behavior implemented in the current codebase. Earlier sections describe the complete product target; this section distinguishes working behavior from future work.
+
+### 41.1 Supported Imports
+
+The application currently imports:
+
+- CBZ through Go's `archive/zip`.
+- CBR through the pure-Go `rardecode` library.
+- PDF through Poppler's `pdftocairo` and `pdfinfo` commands.
+
+PDF support requires:
+
+```sh
+sudo apt install poppler-utils
+```
+
+Imports run asynchronously after the upload completes. The browser reports network-upload progress, then polls persisted backend processing progress through extraction, rendering, detection, and publishing.
+
+The import control displays:
+
+- Current phase.
+- Combined percentage.
+- A clockwise filling border.
+- Processing errors returned by the backend.
+
+### 41.2 Automatic Panel Detection
+
+Newly imported pages are analyzed automatically before the comic becomes ready.
+
+The current detector is implemented in pure Go and does not require OpenCV. It:
+
+1. Decodes the page image.
+2. Creates a bounded analysis image with a maximum dimension of 900 pixels.
+3. Searches for full-span low-activity and low-variance gutter or border bands.
+4. Supports white, black, and colored separators.
+5. Recursively splits page regions horizontally and vertically.
+6. Rejects tiny or unreliable regions.
+7. Limits recursion depth and frames per page.
+8. Orders results top-to-bottom and left-to-right.
+9. Converts rectangles into normalized rich frame metadata.
+10. Falls back to one full-page frame when no reliable split is found.
+
+Detection progress is stored using the `detecting panels` processing phase.
+
+Detection endpoints:
+
+```text
+POST /api/v1/comics/{comicID}/pages/{pageNumber}/detect
+POST /api/v1/comics/{comicID}/pages/{pageNumber}/detect?reset=true
+POST /api/v1/comics/{comicID}/detect
+POST /api/v1/comics/{comicID}/detect?reset=true
+```
+
+Default behavior preserves pages containing `manual` or `manual_edited` frames. Page-level detection returns `409 Conflict` when manual work exists. Comic-wide detection skips those pages and reports their page numbers. The `reset=true` option explicitly permits replacement.
+
+The frame editor provides an **Auto detect** action. It asks for confirmation before replacing manual work.
+
+Current detector limitations:
+
+- It works best when panels are separated by visible gutters or long borders.
+- Borderless, overlapping, highly irregular, and artwork-crossing layouts may require manual correction.
+- Detection generates a creator-editable starting sequence; it is not treated as infallible publication metadata.
+- Future OpenCV or ML detectors may replace the implementation without changing the reader contract.
+
+### 41.3 Rich Frame Metadata
+
+Persisted frames currently support:
+
+- Rectangle and polygon shapes.
+- `full_page`, `panel`, `focus`, `speech`, and `object` frame types.
+- Normalized coordinates and polygon points.
+- `contain` and `cover` fit modes.
+- Per-frame padding.
+- Per-frame mask opacity.
+- Per-frame transition duration and easing.
+- Enabled and disabled states.
+- `detected`, `manual`, and `manual_edited` sources.
+- Consecutive one-based reading order.
+
+Frame APIs use optimistic page revisions:
+
+```text
+GET  /api/v1/comics/{comicID}/pages/{pageNumber}/frames
+PUT  /api/v1/comics/{comicID}/pages/{pageNumber}/frames
+POST /api/v1/comics/{comicID}/pages/{pageNumber}/frames/full-page
+```
+
+Frame retrieval response:
+
+```json
+{
+  "revision": 4,
+  "frames": []
+}
+```
+
+Frame replacement request:
+
+```json
+{
+  "revision": 4,
+  "frames": []
+}
+```
+
+A stale revision returns `409 Conflict` and does not overwrite newer edits.
+
+### 41.4 Creator Frame Editor
+
+The current editor supports:
+
+- Automatic detection for the current page.
+- Rectangle creation.
+- Polygon creation.
+- Full-page frame creation.
+- Frame duplication and deletion.
+- Earlier and later ordering.
+- Undo and redo history.
+- Debounced auto-save after completed changes.
+- Explicit save status and manual save.
+- Unsaved-change warning.
+- Frame name, type, fit, padding, mask, transition, and enabled properties.
+- Numbered debug outlines.
+
+Rectangle interaction includes:
+
+- A center handle for moving the complete frame.
+- Four corner resize handles.
+- Top, right, bottom, and left edge resize handles.
+- Page-boundary constraints.
+- A minimum valid frame size.
+
+Polygon interaction includes:
+
+- Numbered draggable vertex handles on the canvas.
+- A center diamond for moving the complete polygon.
+- Adding and removing points.
+- Numeric normalized point editing as an accessible fallback.
+- Page-boundary constraints for vertices and complete-polygon movement.
+
+### 41.5 Reader Behavior
+
+The reader currently supports:
+
+- Panel mode using enabled creator-defined frames.
+- Page mode using one complete page at a time.
+- Vertical mode using a continuous page stream.
+- Rectangle and polygon camera bounds.
+- `contain` and `cover` fitting.
+- Per-frame padding, maximum zoom, duration, and easing.
+- Rectangle and polygon SVG masks.
+- Same-page pan and zoom without reloading the page image.
+- Direct transition from the final frame to the next page's first frame.
+- Keyboard, button, and tap-zone navigation.
+- LTR and RTL directional controls.
+- Reduced-motion behavior.
+- Full-page fallback when enabled frame metadata is missing.
+
+Exact progress stores and restores:
+
+- Page number.
+- Frame order.
+- Reading mode.
+- Reading direction.
+
+Progress is persisted in SQLite and mirrored to browser storage as an anonymous fallback.
+
+### 41.6 Library Covers
+
+Comic list responses include:
+
+```json
+{
+  "cover_url": "/api/v1/comics/comic_123/pages/1/image"
+}
+```
+
+The first page currently serves as the comic cover. Library cards:
+
+- Display the first page with cover cropping.
+- Apply a gradient for readable title and page-count text.
+- Limit long visible titles.
+- Lazy-load cover images.
+- Fall back to a text card when no page image is available.
+
+Dedicated generated covers and thumbnails remain future work.
+
+### 41.7 Comic Deletion
+
+Each library card includes an × control in its top-right corner. The control is separate from the action that opens the comic.
+
+Selecting × opens an accessible warning dialog containing:
+
+- The comic title.
+- A permanent-deletion warning.
+- A **Close** action.
+- A destructive **Delete** action.
+
+Deletion endpoint:
+
+```text
+DELETE /api/v1/comics/{comicID}
+```
+
+Successful deletion removes:
+
+- Comic database metadata.
+- Page and frame records through foreign-key cascades.
+- Reading progress.
+- Stored comic files.
+- Local browser progress for that comic.
+
+The delete control remains visible on touch-only devices.
+
+### 41.8 Missing Asset Behavior
+
+SQLite metadata does not contain page-image bytes. A comic cannot be detected or read when its database records remain but its files under `storage/comics/{comicID}` are missing.
+
+Symptoms include:
+
+- Page-image API returning `404 Not Found`.
+- Browser cache temporarily displaying an image that no longer exists on the backend.
+- Automatic detection returning a page-asset or detection failure.
+
+Missing page assets cannot be reconstructed from SQLite. The source CBZ, CBR, or PDF must be imported again.
+
+Future hardening should:
+
+- Validate page assets during startup.
+- Mark inconsistent comics as failed.
+- Return a specific `page_asset_missing` error.
+- Offer a direct re-import action.
+- Clean orphaned metadata and filesystem directories safely.
+
+### 41.9 Current Verification
+
+The implemented backend and frontend are verified with:
+
+```sh
+cd backend
+go test -race ./...
+go vet ./...
+
+cd ../frontend
+npm run build
+```
+
+Backend tests currently cover import behavior, archive safety, asynchronous progress, rich frame validation, polygon validation, revision conflicts, automatic detection, full-page fallback, and preservation of manual frames.
+
+### 41.10 Optional AI Instance Segmentation
+
+The codebase includes an optional Python FastAPI worker under `ai-service/`. It loads a custom one-class comic-panel segmentation checkpoint and implements:
+
+```text
+POST /internal/v1/panel-detection
+GET  /health
+```
+
+Go enables the worker with:
+
+```text
+PANEL_READER_AI_URL=http://127.0.0.1:8090
+PANEL_READER_AI_STORAGE_ROOT=/data
+PANEL_READER_AI_TIMEOUT=30s
+```
+
+Detection behavior is:
+
+```text
+Page image
+  -> call configured AI worker
+  -> validate complete response in Go
+  -> normalize and order rich frames
+  -> persist confidence and model version
+  -> use pure-Go detector if AI is unavailable or invalid
+```
+
+The worker returns polygon masks, bounding boxes, confidence scores, and model version metadata. Go rejects non-finite values, out-of-bounds coordinates, invalid polygons, invalid confidence, excessive panel counts, oversized responses, and malformed metadata before persistence.
+
+The editor displays confidence using initial review bands:
+
+- `>= 0.85`: likely correct.
+- `0.50–0.84`: review recommended.
+- `< 0.50`: low confidence.
+
+These thresholds are presentation defaults and must be tuned against a representative validation set.
+
+No trained checkpoint is included. A custom checkpoint must be trained from licensed polygon annotations and placed at `models/comic-panel-seg.pt`. The included `ai-service/train.py` and `dataset.example.yaml` provide a one-class YOLO segmentation training entry point.
+
+Ultralytics' default licensing is AGPL-3.0. A proprietary deployment must comply with those terms, obtain an appropriate commercial licence, or replace the Python implementation with a commercially compatible detector such as Detectron2 Mask R-CNN. The Go integration depends only on the documented HTTP contract and can use either implementation.
+
+#### Hosted Roboflow Provider
+
+The AI adapter also supports hosted inference using:
+
+```text
+PANEL_AI_PROVIDER=roboflow
+ROBOFLOW_API_URL=https://serverless.roboflow.com
+ROBOFLOW_API_KEY=<secret environment value>
+ROBOFLOW_MODEL_ID=comic-panel-detectors/7
+ROBOFLOW_PANEL_CLASSES=panel,panels
+```
+
+The API key must never be stored in source code, React, committed environment files, documentation, logs, or Docker image layers. Exposed keys must be revoked and replaced.
+
+Roboflow predictions are converted as follows:
+
+```text
+left = centerX - width / 2
+top  = centerY - height / 2
+
+normalizedX      = left / imageWidth
+normalizedY      = top / imageHeight
+normalizedWidth  = width / imageWidth
+normalizedHeight = height / imageHeight
+```
+
+Segmentation points are preserved as normalized polygons when the provider returns them. Otherwise, the prediction becomes a rectangle frame. Cover and unrelated classes are filtered out. Empty, malformed, unauthorised, rate-limited, or unavailable hosted responses trigger the existing Go detector fallback.
+
+Roboflow dataset attribution:
+
+```text
+Comic Panel Detectors Dataset by Personal
+https://universe.roboflow.com/personal-ov9jg/comic-panel-detectors
+CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+```
+
+Hosted inference sends page images to Roboflow and therefore is not local-first. Review provider pricing, retention, privacy, platform terms, dataset provenance, and underlying comic-image rights before production use.
+
+The AI container mounts comic storage read-only and must run with a UID/GID able to traverse the host's private storage directories. Compose uses `PANEL_AI_UID` and `PANEL_AI_GID`; `make run ai` sets them from `id -u` and `id -g`. Missing files return `404`, inaccessible files return `403`, and malformed paths return `422` instead of leaking internal exceptions.

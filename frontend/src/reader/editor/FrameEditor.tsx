@@ -11,10 +11,11 @@ interface DragState {
   frame: FocusFrame;
 }
 
-export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
+export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }: {
   image: string;
   initialFrames: FocusFrame[];
   onSave: (frames: FocusFrame[]) => Promise<void>;
+  onDetect: (reset: boolean) => Promise<void>;
   onCancel: () => void;
 }) {
   const [frames, setFrames] = useState(() => initialFrames.map((frame) => ({ ...frame })));
@@ -22,6 +23,7 @@ export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
   const [drag, setDrag] = useState<DragState | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [detecting, setDetecting] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [undo, setUndo] = useState<FocusFrame[][]>([]);
   const [redo, setRedo] = useState<FocusFrame[][]>([]);
@@ -209,6 +211,21 @@ export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
     onCancel();
   }
 
+  async function detect() {
+    const hasManual = frames.some((frame) => frame.source === "manual" || frame.source === "manual_edited");
+    if (hasManual && !window.confirm("Automatic detection will replace your manual frames on this page. Continue?")) return;
+    setDetecting(true);
+    setError("");
+    try {
+      await onDetect(hasManual);
+      setDirty(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not detect panels.");
+    } finally {
+      setDetecting(false);
+    }
+  }
+
   const active = frames[selected];
   return (
     <section className="frame-editor-shell">
@@ -216,6 +233,7 @@ export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
         <div><span className="tool-kicker">Frame editor</span><strong>Correct the reading path</strong></div>
         <p>Choose a frame, then drag its center to move it or its corner to resize it. Changes auto-save after you finish editing.</p>
         <div className="editor-actions">
+          <button className="detect-action" disabled={detecting} onClick={() => void detect()}>{detecting ? "Detecting..." : "Auto detect"}</button>
           <button onClick={addFrame}>+ Rectangle</button>
           <button onClick={addPolygon}>+ Polygon</button>
           <button onClick={addFullPage}>Full page</button>
@@ -227,7 +245,7 @@ export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
           <button disabled={!redo.length} onClick={redoChange}>Redo</button>
         </div>
         <ol className="frame-list">
-          {frames.map((_, index) => <li key={index}><button className={selected === index ? "active" : ""} onClick={() => setSelected(index)}>Frame {index + 1}</button></li>)}
+          {frames.map((frame, index) => <li key={index}><button className={selected === index ? "active" : ""} onClick={() => setSelected(index)}>Frame {index + 1}{frame.confidence !== undefined && <small className={frame.confidence < .5 ? "low" : frame.confidence < .85 ? "review" : "likely"}>{Math.round(frame.confidence * 100)}%</small>}</button></li>)}
         </ol>
         {active && <div className="frame-properties">
           <label>Name<input value={active.name} onChange={(event) => updateActive({ name: event.target.value })} /></label>
@@ -237,6 +255,7 @@ export function FrameEditor({ image, initialFrames, onSave, onCancel }: {
           <label>Mask <output>{Math.round(active.maskOpacity * 100)}%</output><input type="range" min="0" max="1" step="0.05" value={active.maskOpacity} onChange={(event) => updateActive({ maskOpacity: Number(event.target.value) })} /></label>
           <label>Transition <output>{active.transitionDurationMs} ms</output><input type="range" min="0" max="1200" step="25" value={active.transitionDurationMs} onChange={(event) => updateActive({ transitionDurationMs: Number(event.target.value) })} /></label>
           <label className="check-label"><input type="checkbox" checked={active.isEnabled} onChange={(event) => updateActive({ isEnabled: event.target.checked })} /> Enabled</label>
+          {active.confidence !== undefined && <div className="detection-confidence"><span>AI confidence</span><strong>{Math.round(active.confidence * 100)}%</strong><small>{active.confidence >= .85 ? "Likely correct" : active.confidence >= .5 ? "Review recommended" : "Low confidence"}{active.modelVersion ? ` · ${active.modelVersion}` : ""}</small></div>}
           {active.shapeType === "polygon" && <fieldset className="polygon-points"><legend>Polygon points</legend>{active.polygon.map((point, index) => <div key={index}><span>{index + 1}</span><input aria-label={`Point ${index + 1} X`} type="number" min="0" max="1" step="0.01" value={point.x} onChange={(event) => updatePoint(index, "x", Number(event.target.value))} /><input aria-label={`Point ${index + 1} Y`} type="number" min="0" max="1" step="0.01" value={point.y} onChange={(event) => updatePoint(index, "y", Number(event.target.value))} /><button disabled={active.polygon.length <= 3} onClick={() => removePoint(index)}>×</button></div>)}<button onClick={addPoint}>+ Point</button></fieldset>}
         </div>}
         <div className="save-status">{saving ? "Saving..." : dirty ? "Unsaved changes" : "Saved"}</div>

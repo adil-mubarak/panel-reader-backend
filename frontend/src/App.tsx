@@ -55,6 +55,8 @@ export function App() {
   const [importProgress, setImportProgress] = useState(0);
   const [importPhase, setImportPhase] = useState("");
   const [error, setError] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<Comic | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     void loadComics();
@@ -226,13 +228,42 @@ export function App() {
     }
   }
 
+  async function deleteComic() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setError("");
+    try {
+      const response = await fetch(`${API}/comics/${pendingDelete.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json() as APIError;
+        throw new Error(body.error?.message ?? "Could not delete comic.");
+      }
+      setComics((current) => current.filter((item) => item.id !== pendingDelete.id));
+      localStorage.removeItem(`panel-reader:${pendingDelete.id}`);
+      setPendingDelete(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete comic.");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (comic && pages.length > 0) {
     const page = pages[pageIndex];
     const positionLabel = readerMode === "panel"
       ? `Page ${pageIndex + 1} · Frame ${panelIndex + 1}/${Math.max(1, activeFrames(page).length)}`
       : readerMode === "book" ? `${pages.length} pages` : `${pageIndex + 1} / ${pages.length}`;
     if (editingFrames) {
-      return <FrameEditor image={page.image_url} initialFrames={page.frames} onCancel={() => setEditingFrames(false)} onSave={async (frames) => {
+      return <FrameEditor key={`${page.number}-${page.revision}`} image={page.image_url} initialFrames={page.frames} onCancel={() => setEditingFrames(false)} onDetect={async (reset) => {
+        const response = await fetch(`${API}/comics/${comic.id}/pages/${page.number}/detect${reset ? "?reset=true" : ""}`, { method: "POST" });
+        if (!response.ok) {
+          const body = await response.json() as APIError;
+          throw new Error(body.error?.message ?? "Could not detect panels.");
+        }
+        const detected = await response.json() as { revision: number; frames: FocusFrame[] };
+        setPages((current) => current.map((item, index) => index === pageIndex ? { ...item, frames: detected.frames, revision: detected.revision, frameSetupComplete: true } : item));
+        setPanelIndex(0);
+      }} onSave={async (frames) => {
         const response = await fetch(`${API}/comics/${comic.id}/pages/${page.number}/frames`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -317,16 +348,33 @@ export function App() {
         ) : (
           <div className="comic-grid">
             {comics.map((item, index) => (
-              <button className="comic-card" key={item.id} onClick={() => void openComic(item)}>
-                {item.cover_url && <img className="card-cover" src={item.cover_url} alt="" loading="lazy" />}
-                <span className="card-shade" />
-                <span className="card-number">{String(index + 1).padStart(2, "0")}</span>
-                <span className="card-copy"><span className="card-title">{item.title}</span><span className="card-meta">{item.page_count} pages</span></span>
-              </button>
+              <article className="comic-card" key={item.id}>
+                <button className="card-open" onClick={() => void openComic(item)}>
+                  {item.cover_url && <img className="card-cover" src={item.cover_url} alt="" loading="lazy" />}
+                  <span className="card-shade" />
+                  <span className="card-number">{String(index + 1).padStart(2, "0")}</span>
+                  <span className="card-copy"><span className="card-title">{item.title}</span><span className="card-meta">{item.page_count} pages</span></span>
+                </button>
+                <button className="card-delete" aria-label={`Delete ${item.title}`} onClick={() => setPendingDelete(item)}>×</button>
+              </article>
             ))}
           </div>
         )}
       </section>
+      {pendingDelete && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setPendingDelete(null); }}>
+          <section className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
+            <button className="dialog-close" aria-label="Close delete warning" disabled={deleting} onClick={() => setPendingDelete(null)}>×</button>
+            <p className="tool-kicker">Delete comic</p>
+            <h2 id="delete-title">Remove this comic?</h2>
+            <p id="delete-description"><strong>{pendingDelete.title}</strong> and its imported pages, frames, and reading progress will be permanently deleted.</p>
+            <div className="dialog-actions">
+              <button disabled={deleting} onClick={() => setPendingDelete(null)}>Close</button>
+              <button className="danger" disabled={deleting} onClick={() => void deleteComic()}>{deleting ? "Deleting..." : "Delete"}</button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

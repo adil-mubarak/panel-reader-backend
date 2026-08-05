@@ -1,0 +1,54 @@
+import os
+import unittest
+from unittest.mock import patch
+
+from fastapi import HTTPException
+
+from app.main import convert_roboflow_result, safe_image_path
+
+
+class RoboflowConversionTests(unittest.TestCase):
+    def test_converts_center_box_and_filters_cover(self):
+        result = {
+            "image": {"width": 1000, "height": 2000},
+            "predictions": [
+                {"class": "Panels", "confidence": 0.9, "x": 300, "y": 400, "width": 400, "height": 500},
+                {"class": "Cover", "confidence": 0.99, "x": 500, "y": 1000, "width": 1000, "height": 2000},
+            ],
+        }
+        with patch.dict(os.environ, {"ROBOFLOW_PANEL_CLASSES": "panel,panels", "PANEL_CONFIDENCE": "0.25"}):
+            response = convert_roboflow_result(result, 1000, 2000, "comic-panel-detectors/7")
+        self.assertEqual(len(response.panels), 1)
+        self.assertAlmostEqual(response.panels[0].boundingBox.x, 0.1)
+        self.assertAlmostEqual(response.panels[0].boundingBox.y, 0.075)
+        self.assertEqual(response.modelVersion, "roboflow/comic-panel-detectors/7")
+
+    def test_preserves_segmentation_points(self):
+        result = {
+            "predictions": [{
+                "class": "panel",
+                "confidence": 0.8,
+                "x": 50,
+                "y": 50,
+                "width": 80,
+                "height": 80,
+                "points": [{"x": 10, "y": 10}, {"x": 90, "y": 10}, {"x": 50, "y": 90}],
+            }],
+        }
+        response = convert_roboflow_result(result, 100, 100, "model/1")
+        self.assertEqual(len(response.panels[0].polygon), 3)
+        self.assertAlmostEqual(response.panels[0].polygon[0].x, 0.1)
+
+    def test_rejects_empty_valid_predictions(self):
+        with self.assertRaises(RuntimeError):
+            convert_roboflow_result({"predictions": []}, 100, 100, "model/1")
+
+    def test_inaccessible_image_returns_forbidden(self):
+        with patch("app.main.Path.resolve", side_effect=PermissionError("denied")):
+            with self.assertRaises(HTTPException) as raised:
+                safe_image_path("/data/comics/page.jpg")
+        self.assertEqual(raised.exception.status_code, 403)
+
+
+if __name__ == "__main__":
+    unittest.main()

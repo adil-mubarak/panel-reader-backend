@@ -1,9 +1,11 @@
-.PHONY: help run debug debug-server backend frontend test build
+.PHONY: help run debug debug-server backend backend-ai frontend ai ai-build test build
 
 help:
 	@printf '%s\n' \
 		'make run backend   Run the Go API' \
 		'make run frontend  Run the frontend development server' \
+		'make run ai        Run the Python panel detector in Docker' \
+		'make run backend-ai Run the Go API with the AI detector enabled' \
 		'make debug backend Run the Go API with Delve on port 2345' \
 		'make test          Run backend tests' \
 		'make build         Build the frontend'
@@ -29,6 +31,15 @@ ifeq ($(filter debug,$(MAKECMDGOALS)),debug)
 else
 	go -C backend run ./cmd/server
 endif
+
+backend-ai:
+	PANEL_READER_AI_URL=http://127.0.0.1:8090 PANEL_READER_AI_STORAGE_ROOT=/data go -C backend run ./cmd/server
+
+ai:
+	PANEL_AI_UID=$$(id -u) PANEL_AI_GID=$$(id -g) docker compose up panel-ai
+
+ai-build:
+	docker compose build panel-ai
 
 frontend: frontend/node_modules
 	npm --prefix frontend run dev

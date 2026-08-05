@@ -4,6 +4,8 @@ Local-first CBZ, CBR, and PDF reader with a Go backend and React frontend.
 
 Reader modes include animated guided frames, single pages, and continuous vertical book scrolling.
 
+Optional custom instance-segmentation is provided by `ai-service/`. See `ai-service/README.md` for model training, licensing, and runtime setup. Without a configured AI checkpoint, the Go backend uses its built-in gutter detector.
+
 PDF import requires Poppler's `pdftocairo` command:
 
 ```sh
