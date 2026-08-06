@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY tests ./tests
+COPY train.py validate_dataset.py prepare_roboflow_dataset.py dataset.example.yaml ./
 
 RUN useradd --create-home --uid 10001 panel-ai
 USER panel-ai

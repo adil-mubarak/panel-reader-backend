@@ -48,22 +48,67 @@ PANEL_AI_UID=$(id -u) PANEL_AI_GID=$(id -g) \
 
 The default Docker image is lightweight and uses hosted Roboflow. It does not install PyTorch or Ultralytics. Configure `PANEL_AI_PROVIDER=roboflow`, `ROBOFLOW_API_KEY`, and `ROBOFLOW_MODEL_ID=comic-panel-detectors/7` in `.env`.
 
-For local checkpoint inference, build `Dockerfile.local`, which installs the substantially larger PyTorch and Ultralytics stack. If a selected provider is unavailable, Go safely uses its pure-Go gutter detector.
-
-## Train
-
-Prepare a YOLO segmentation dataset with one class named `panel`, then copy and edit the example dataset configuration:
+For local checkpoint inference, `compose.local.yaml` builds `Dockerfile.local`, installs the substantially larger PyTorch and Ultralytics stack, and forces the local provider. If a selected provider is unavailable, Go safely uses its pure-Go gutter detector.
 
 ```sh
-cd ai-service
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-cp dataset.example.yaml dataset.yaml
-python train.py --data dataset.yaml --base yolo11n-seg.pt --epochs 100 --image-size 1280
+make ai-local-build
+make ai-local
+make ai-health
 ```
 
-Copy the best checkpoint from the generated run into `../models/comic-panel-seg.pt`.
+With a checkpoint at `models/comic-panel-seg.pt`, health reports JSON containing `"status":"ok"`, `"provider":"local"`, and `"modelConfigured":true`. Without it, the HTTP health endpoint remains reachable but reports `"status":"model_missing"`; inference is unavailable until the checkpoint is installed.
+
+## Train Locally
+
+Training requires an authorised comic-page dataset and suitable compute, normally an NVIDIA GPU. This repository does not include or download a dataset, does not run training automatically, and cannot guarantee perfect panel detection. Review predictions in the creator editor.
+
+In Roboflow, create an **Instance Segmentation** project with exactly one class named `panel`. Draw one polygon around each panel that should become a guided-reading frame. Include conventional, borderless, irregular, inset, and overlapping panels when they are intended reading units. Exclude covers, full-page art without distinct panels, speech bubbles, characters, page furniture, and ambiguous regions unless they genuinely represent a panel. Keep every page from the same comic in one split to prevent train/validation leakage. Export a generated version as **YOLOv8 Oriented Bounding Boxes** is not valid; choose **YOLOv8 Instance Segmentation** (YOLO segmentation), download the ZIP, and extract it without rearranging files.
+
+A typical extraction is:
+
+```text
+comic-panels/
+|-- train/images/ and train/labels/
+|-- valid/images/ and valid/labels/
+|-- test/images/ and test/labels/
+`-- data.yaml
+```
+
+Labels must contain class ID plus polygon coordinates, not five-token object-detection boxes. Images with no panels are useful negatives and may have an absent or empty label file. Copy `dataset.example.yaml` to a convenient location and edit its `path`; relative paths resolve from the YAML file. The optional `test` split may be omitted, while `train` and `val` are required.
+
+Set up the host environment and validate without reading image pixels:
+
+```sh
+make ai-venv
+make dataset-validate DATASET=/absolute/path/to/data.yaml
+```
+
+Train only after validation succeeds:
+
+```sh
+make train-ai DATASET=/absolute/path/to/data.yaml BASE=yolo11n-seg.pt EPOCHS=100 IMAGE_SIZE=1280 BATCH=8 DEVICE=0
+```
+
+Equivalent direct usage is `ai-service/.venv/bin/python ai-service/train.py --data /absolute/path/to/data.yaml --base yolo11n-seg.pt --epochs 100 --image-size 1280`. The script also accepts `--workers`, `--patience`, `--seed`, `--project`, and `--name`, and prints the resolved best-checkpoint path. By default output is under `ai-service/runs/panel-segmentation/comic-panel-seg/weights/best.pt`, regardless of the current working directory. Copy it into the runtime mount:
+
+```sh
+cp ai-service/runs/panel-segmentation/comic-panel-seg/weights/best.pt models/comic-panel-seg.pt
+make ai-local-build
+make ai-local
+```
+
+The `BASE` checkpoint may be downloaded by Ultralytics when training starts; no weights are downloaded during validation or tests. Ultralytics and its model distribution are subject to the AGPL-3.0 licensing terms noted above.
+
+For a Roboflow export containing extra classes, normalize it before validation. The preparation command hard-links images where possible, removes non-panel annotations, remaps `Panels` to `panel`, cleans duplicate polygon vertices, preserves empty pages as negatives, and writes attribution:
+
+```sh
+make dataset-prepare \
+  DATASET_SOURCE=/path/to/roboflow-export \
+  DATASET_OUTPUT=/path/to/normalized-dataset
+make dataset-validate DATASET=/path/to/normalized-dataset/data.yaml
+```
+
+The local Docker image is pinned to official CPU-only PyTorch wheels so it remains usable on hosts without NVIDIA hardware. Full-resolution, multi-epoch training on thousands of pages still requires substantially more time than GPU training.
 
 ## Configuration
 
@@ -93,6 +138,16 @@ The hosted provider defaults to:
 comic-panel-detectors/7
 ```
 
+Detector selection follows the comic's explicit content type:
+
+```text
+comic   -> ROBOFLOW_COMIC_MODEL_ID (comic-panel-detectors/7)
+manga   -> ROBOFLOW_MANGA_MODEL_ID (manga-test/2)
+webtoon -> ROBOFLOW_WEBTOON_MODEL_ID, or the comic model when unset
+```
+
+The Manga specialist is an object-detection model, so its boxes still pass through the configured segmentation workflow for polygon refinement and then through the Go structural completeness pass. Manga reading order remains RTL; model selection does not reverse Previous/Next controls. `manga-test/2` is published under CC BY 4.0, but underlying image provenance should still be reviewed before commercial use. Version 1 is intentionally not combined with version 2 because their source images overlap.
+
 Roboflow center-based boxes are converted to normalized top-left rectangles. Segmentation `points`, when returned, are preserved as normalized polygon frames. Predictions outside `ROBOFLOW_PANEL_CLASSES` are ignored.
 
 ### Hybrid Polygon Refinement
@@ -121,3 +176,5 @@ https://creativecommons.org/licenses/by/4.0/
 ```
 
 The dataset licence does not independently prove ownership of every underlying comic image. Review provenance and Roboflow's hosted-inference terms before commercial use.
+
+An optional public instance-segmentation source evaluated by this project is `Comic Book Panel Detection 2` version 2, published as CC BY 4.0. Its export contains `Cover` and `Panels`; use `dataset-prepare` to retain only panel polygons. The published version also contains rotation augmentation, so a model trained from it must be evaluated against unrotated held-out pages before deployment.
