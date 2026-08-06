@@ -2,16 +2,21 @@ package app
 
 import (
 	"math"
+	"strconv"
+	"strings"
 )
 
 const postprocessMaxFrames = 64
 
 type DetectionReport struct {
-	Warnings          []string `json:"warnings"`
-	PanelCount        int      `json:"panelCount"`
-	Coverage          float64  `json:"coverage"`
-	AverageConfidence float64  `json:"averageConfidence,omitempty"`
-	Classification    string   `json:"classification,omitempty"`
+	Warnings                 []string `json:"warnings"`
+	PanelCount               int      `json:"panelCount"`
+	Coverage                 float64  `json:"coverage"`
+	AverageConfidence        float64  `json:"averageConfidence,omitempty"`
+	Classification           string   `json:"classification,omitempty"`
+	AICandidateCount         int      `json:"aiCandidateCount"`
+	StructuralCandidateCount int      `json:"structuralCandidateCount"`
+	RecoveredPanelCount      int      `json:"recoveredPanelCount"`
 }
 
 func postprocessDetections(frames []Panel, direction string, confidenceThreshold float64, ai bool) []Panel {
@@ -172,6 +177,15 @@ func buildDetectionReport(frames []Panel) DetectionReport {
 	}
 	confidenceCount, overlapPairs := 0, 0
 	for i, f := range frames {
+		if strings.Contains(f.ModelVersion, "roboflow/") {
+			report.AICandidateCount++
+		}
+		if strings.Contains(f.ModelVersion, "structural/") || strings.Contains(f.ModelVersion, "structural-") {
+			report.StructuralCandidateCount++
+			if strings.HasPrefix(f.ModelVersion, "hybrid/") {
+				report.RecoveredPanelCount++
+			}
+		}
 		if f.Confidence > 0 {
 			report.AverageConfidence += f.Confidence
 			confidenceCount++
@@ -180,6 +194,14 @@ func buildDetectionReport(frames []Panel) DetectionReport {
 			if intersectionArea(f, frames[j])/math.Min(frameArea(f), frameArea(frames[j])) > .35 {
 				overlapPairs++
 			}
+		}
+	}
+	for _, f := range frames {
+		if ai, structural, recovered, ok := detectionProvenanceCounts(f.ModelVersion); ok {
+			report.AICandidateCount = ai
+			report.StructuralCandidateCount = structural
+			report.RecoveredPanelCount = recovered
+			break
 		}
 	}
 	if confidenceCount > 0 {
@@ -212,6 +234,10 @@ func buildDetectionReport(frames []Panel) DetectionReport {
 	if report.Coverage < .55 {
 		report.Warnings = append(report.Warnings, "large_uncovered_area")
 	}
+	if report.RecoveredPanelCount > 0 {
+		report.Warnings = append(report.Warnings, "detector_disagreement")
+		report.Classification = "detector_disagreement"
+	}
 	if len(frames) > 30 {
 		report.Warnings = append(report.Warnings, "too_many_panels")
 	}
@@ -222,6 +248,28 @@ func buildDetectionReport(frames []Panel) DetectionReport {
 		}
 	}
 	return report
+}
+
+func detectionProvenanceCounts(version string) (ai, structural, recovered int, ok bool) {
+	values := map[string]*int{
+		"aiCandidates":         &ai,
+		"structuralCandidates": &structural,
+		"recoveredPanels":      &recovered,
+	}
+	for _, field := range strings.Split(version, ";")[1:] {
+		parts := strings.SplitN(field, "=", 2)
+		destination := values[parts[0]]
+		if len(parts) != 2 || destination == nil {
+			continue
+		}
+		value, err := strconv.Atoi(parts[1])
+		if err != nil || value < 0 {
+			return 0, 0, 0, false
+		}
+		*destination = value
+		ok = true
+	}
+	return
 }
 
 func pointInFrame(x, y float64, f Panel) bool {

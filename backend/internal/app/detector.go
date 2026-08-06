@@ -99,9 +99,66 @@ func detectPanels(ctx context.Context, r io.Reader) ([]Panel, error) {
 		frame.Name = "Detected panel " + itoa(i+1)
 		frame.X, frame.Y = float64(rect.x0)/float64(a.w), float64(rect.y0)/float64(a.h)
 		frame.Width, frame.Height = float64(rect.x1-rect.x0)/float64(a.w), float64(rect.y1-rect.y0)/float64(a.h)
+		frame.Confidence = a.distributedContentScore(rect)
 		frames = append(frames, frame)
 	}
 	return frames, nil
+}
+
+// distributedContentScore rewards activity spread through a region rather than
+// a small cluster of text-like marks on an otherwise uniform background.
+func (a analysisImage) distributedContentScore(r detectionRect) float64 {
+	const grid = 4
+	w, h := r.x1-r.x0, r.y1-r.y0
+	insetX, insetY := w/20, h/20
+	r.x0, r.x1 = r.x0+insetX, r.x1-insetX
+	r.y0, r.y1 = r.y0+insetY, r.y1-insetY
+	if r.x1-r.x0 < grid || r.y1-r.y0 < grid {
+		return 0
+	}
+	active := 0
+	rows, cols := [grid]bool{}, [grid]bool{}
+	for gy := 0; gy < grid; gy++ {
+		for gx := 0; gx < grid; gx++ {
+			x0 := r.x0 + (r.x1-r.x0)*gx/grid
+			x1 := r.x0 + (r.x1-r.x0)*(gx+1)/grid
+			y0 := r.y0 + (r.y1-r.y0)*gy/grid
+			y1 := r.y0 + (r.y1-r.y0)*(gy+1)/grid
+			var sum, sum2, activity float64
+			count, edges := 0, 0
+			for y := y0; y < y1; y++ {
+				for x := x0; x < x1; x++ {
+					v := a.pix[y*a.w+x]
+					sum, sum2, count = sum+v, sum2+v*v, count+1
+					if x > x0 {
+						activity += math.Abs(v - a.pix[y*a.w+x-1])
+						edges++
+					}
+					if y > y0 {
+						activity += math.Abs(v - a.pix[(y-1)*a.w+x])
+						edges++
+					}
+				}
+			}
+			mean := sum / float64(count)
+			variance := math.Max(0, sum2/float64(count)-mean*mean)
+			if variance >= .0015 || activity/float64(max(1, edges)) >= .03 {
+				active++
+				rows[gy], cols[gx] = true, true
+			}
+		}
+	}
+	activeRows, activeCols := 0, 0
+	for i := 0; i < grid; i++ {
+		if rows[i] {
+			activeRows++
+		}
+		if cols[i] {
+			activeCols++
+		}
+	}
+	coverage := math.Min(float64(activeRows)/grid, float64(activeCols)/grid)
+	return .7*float64(active)/(grid*grid) + .3*coverage
 }
 
 func downsampleImage(src image.Image) analysisImage {

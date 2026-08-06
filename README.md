@@ -8,7 +8,9 @@ The reader keeps a bounded decoded-page cache, crossfades already-decoded pages,
 
 Optional custom instance-segmentation is provided by `ai-service/`. See `ai-service/README.md` for model training, licensing, and runtime setup. Without a configured AI checkpoint, the Go backend uses its built-in gutter detector.
 
-The frame editor includes conservative splash/no-panel fallback, adaptive rectangle/polygon output, detection quality warnings, split/merge tools, page approval, and approved-page YOLO/COCO exports for building an authorised correction dataset.
+The frame editor includes conservative splash/no-panel fallback, adaptive rectangle/polygon output, and hybrid completeness checks. When hosted AI omits a bordered panel, the backend also runs its structural detector, recovers reliable missing candidates, and reports AI, structural, and recovered counts for creator review. Existing pages can be reprocessed with **Auto detect**.
+
+The editor also includes detection quality warnings, split/merge tools, page approval, and approved-page YOLO/COCO exports for building an authorised correction dataset.
 
 PDF import requires Poppler's `pdftocairo` command:
 

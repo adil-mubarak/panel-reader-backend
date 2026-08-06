@@ -37,6 +37,9 @@ interface Page {
     panelCount: number;
     coverage: number;
     averageConfidence: number;
+    aiCandidateCount?: number;
+    structuralCandidateCount?: number;
+    recoveredPanelCount?: number;
   };
 }
 

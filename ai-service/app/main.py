@@ -13,7 +13,7 @@ class DetectionRequest(BaseModel):
     comicId: str = Field(min_length=1, max_length=200)
     page: int = Field(ge=1)
     imagePath: str = Field(min_length=1)
-    readingDirection: Literal["ltr", "rtl"] = "ltr"
+    readingDirection: Literal["ltr", "rtl", "vertical"] = "ltr"
 
 
 class Point(BaseModel):
