@@ -95,6 +95,22 @@ comic-panel-detectors/7
 
 Roboflow center-based boxes are converted to normalized top-left rectangles. Segmentation `points`, when returned, are preserved as normalized polygon frames. Predictions outside `ROBOFLOW_PANEL_CLASSES` are ignored.
 
+### Hybrid Polygon Refinement
+
+Set:
+
+```text
+PANEL_AI_PROVIDER=roboflow_hybrid
+ROBOFLOW_WORKSPACE=adil-mubarak
+ROBOFLOW_WORKFLOW_ID=general-segmentation-api-12
+ROBOFLOW_WORKFLOW_CLASSES=Cover, Panels
+ROBOFLOW_MASK_MATCH_IOU=0.30
+```
+
+Hybrid mode runs `comic-panel-detectors/7` for stable candidate boxes and the segmentation workflow for masks. A valid polygon replaces a rectangle only when their bounding boxes overlap by at least the configured IoU. Invalid or unmatched masks retain the detector rectangle. Valid unmatched panel masks may be added when they do not duplicate an accepted frame.
+
+The workflow parser supports nested Roboflow output objects, center-based boxes, polygon-only predictions, dictionary points, and `[x, y]` point pairs. Cover predictions are filtered from the reading sequence.
+
 Dataset attribution:
 
 ```text

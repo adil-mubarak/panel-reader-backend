@@ -30,15 +30,20 @@ import (
 )
 
 type Config struct {
-	StorageRoot          string
-	DatabasePath         string
-	MaxUpload            int64
-	MaxEntries           int
-	MaxExtracted         int64
-	MaxFile              int64
-	PanelDetectorURL     string
-	PanelDetectorTimeout time.Duration
-	PanelDetectorRoot    string
+	StorageRoot                    string
+	DatabasePath                   string
+	MaxUpload                      int64
+	MaxEntries                     int
+	MaxExtracted                   int64
+	MaxFile                        int64
+	PanelDetectorURL               string
+	PanelDetectorTimeout           time.Duration
+	PanelDetectorRoot              string
+	DetectionConfidenceThreshold   float64
+	DetectionReliableConfidence    float64
+	DetectionMinCoverage           float64
+	DetectionMaxOverlap            float64
+	DetectionPolygonRectangularity float64
 }
 
 type App struct {
@@ -49,27 +54,32 @@ type App struct {
 }
 
 type Comic struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	Status       string    `json:"status"`
-	Progress     int       `json:"progress"`
-	Phase        string    `json:"phase"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	PageCount    int       `json:"page_count"`
-	CoverURL     string    `json:"cover_url,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	Title              string    `json:"title"`
+	Status             string    `json:"status"`
+	Progress           int       `json:"progress"`
+	Phase              string    `json:"phase"`
+	ErrorMessage       string    `json:"error_message,omitempty"`
+	PageCount          int       `json:"page_count"`
+	CoverURL           string    `json:"cover_url,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	ContentType        string    `json:"contentType"`
+	ReadingDirection   string    `json:"readingDirection"`
+	DefaultReadingMode string    `json:"defaultReadingMode"`
 }
 
 type Page struct {
-	Number             int     `json:"number"`
-	Width              int     `json:"width"`
-	Height             int     `json:"height"`
-	MediaType          string  `json:"media_type"`
-	ImageURL           string  `json:"image_url"`
-	Panels             []Panel `json:"panels"`
-	Frames             []Panel `json:"frames"`
-	Revision           int     `json:"revision"`
-	FrameSetupComplete bool    `json:"frameSetupComplete"`
+	Number             int             `json:"number"`
+	Width              int             `json:"width"`
+	Height             int             `json:"height"`
+	MediaType          string          `json:"media_type"`
+	ImageURL           string          `json:"image_url"`
+	Panels             []Panel         `json:"panels"`
+	Frames             []Panel         `json:"frames"`
+	Revision           int             `json:"revision"`
+	FrameSetupComplete bool            `json:"frameSetupComplete"`
+	ReviewStatus       string          `json:"reviewStatus"`
+	DetectionReport    DetectionReport `json:"detectionReport"`
 }
 
 type Point struct {
@@ -102,8 +112,10 @@ type Panel struct {
 }
 
 type framesResponse struct {
-	Revision int     `json:"revision"`
-	Frames   []Panel `json:"frames"`
+	Revision        int             `json:"revision"`
+	Frames          []Panel         `json:"frames"`
+	ReviewStatus    string          `json:"reviewStatus"`
+	DetectionReport DetectionReport `json:"detectionReport"`
 }
 
 type ReadingProgress struct {
@@ -134,6 +146,21 @@ func New(config Config, logger *slog.Logger) (*App, error) {
 	db.SetMaxOpenConns(1)
 	if config.PanelDetectorTimeout <= 0 {
 		config.PanelDetectorTimeout = 30 * time.Second
+	}
+	if config.DetectionConfidenceThreshold <= 0 {
+		config.DetectionConfidenceThreshold = .25
+	}
+	if config.DetectionReliableConfidence <= 0 {
+		config.DetectionReliableConfidence = .55
+	}
+	if config.DetectionMinCoverage <= 0 {
+		config.DetectionMinCoverage = .35
+	}
+	if config.DetectionMaxOverlap <= 0 {
+		config.DetectionMaxOverlap = .35
+	}
+	if config.DetectionPolygonRectangularity <= 0 {
+		config.DetectionPolygonRectangularity = .9
 	}
 	a := &App{config: config, db: db, logger: logger, httpClient: &http.Client{Timeout: config.PanelDetectorTimeout}}
 	if err := a.migrate(); err != nil {
@@ -206,6 +233,9 @@ func (a *App) migrate() error {
 		{"progress", `INTEGER NOT NULL DEFAULT 100`},
 		{"phase", `TEXT NOT NULL DEFAULT 'ready'`},
 		{"error_message", `TEXT`},
+		{"content_type", `TEXT NOT NULL DEFAULT 'comic'`},
+		{"reading_direction", `TEXT NOT NULL DEFAULT 'ltr'`},
+		{"default_reading_mode", `TEXT NOT NULL DEFAULT 'panel'`},
 	}
 	for _, addition := range additions {
 		if !columns[addition.name] {
@@ -221,6 +251,8 @@ func (a *App) migrate() error {
 	for _, addition := range []struct{ name, definition string }{
 		{"revision", `INTEGER NOT NULL DEFAULT 0`},
 		{"frame_setup_complete", `INTEGER NOT NULL DEFAULT 0`},
+		{"review_status", `TEXT NOT NULL DEFAULT 'unreviewed'`},
+		{"detection_report_json", `TEXT NOT NULL DEFAULT '{}'`},
 	} {
 		if !pageColumns[addition.name] {
 			if _, err := a.db.Exec(`ALTER TABLE pages ADD COLUMN ` + addition.name + ` ` + addition.definition); err != nil {
@@ -337,6 +369,7 @@ func (a *App) Handler() http.Handler {
 	r.Post("/api/v1/comics", a.uploadComic)
 	r.Get("/api/v1/comics", a.listComics)
 	r.Get("/api/v1/comics/{comicID}", a.getComic)
+	r.Put("/api/v1/comics/{comicID}", a.putComic)
 	r.Delete("/api/v1/comics/{comicID}", a.deleteComic)
 	r.Get("/api/v1/comics/{comicID}/progress", a.getProgress)
 	r.Put("/api/v1/comics/{comicID}/progress", a.putProgress)
@@ -347,6 +380,9 @@ func (a *App) Handler() http.Handler {
 	r.Get("/api/v1/comics/{comicID}/pages/{pageNumber}/frames", a.getFrames)
 	r.Put("/api/v1/comics/{comicID}/pages/{pageNumber}/frames", a.replaceFrames)
 	r.Post("/api/v1/comics/{comicID}/pages/{pageNumber}/frames/full-page", a.addFullPageFrame)
+	r.Post("/api/v1/comics/{comicID}/pages/{pageNumber}/approve", a.approvePage)
+	r.Post("/api/v1/comics/{comicID}/pages/{pageNumber}/unapprove", a.unapprovePage)
+	r.Get("/api/v1/comics/{comicID}/training-export", a.trainingExport)
 	r.Get("/api/v1/comics/{comicID}/pages/{pageNumber}/image", a.pageImage)
 	return r
 }
@@ -359,6 +395,15 @@ func (a *App) uploadComic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	contentType := strings.TrimSpace(r.FormValue("content_type"))
+	if contentType == "" {
+		contentType = "comic"
+	}
+	direction, mode, ok := comicReadingMetadata(contentType)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_content_type", "content_type must be comic, manga, or webtoon.")
+		return
+	}
 	extension := strings.ToLower(filepath.Ext(header.Filename))
 	if extension != ".cbz" && extension != ".cbr" && extension != ".pdf" {
 		writeError(w, http.StatusUnsupportedMediaType, "invalid_file_type", "Only CBZ, CBR, and PDF files are supported.")
@@ -394,17 +439,17 @@ func (a *App) uploadComic(w http.ResponseWriter, r *http.Request) {
 
 	title := strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename))
 	created := time.Now().UTC()
-	comic := Comic{ID: id, Title: title, Status: "processing", Progress: 0, Phase: "queued", CreatedAt: created}
-	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO comics(id,title,status,progress,phase,page_count,created_at) VALUES(?,?,?,?,?,?,?)`, id, title, comic.Status, comic.Progress, comic.Phase, 0, created.Format(time.RFC3339Nano)); err != nil {
+	comic := Comic{ID: id, Title: title, Status: "processing", Progress: 0, Phase: "queued", CreatedAt: created, ContentType: contentType, ReadingDirection: direction, DefaultReadingMode: mode}
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO comics(id,title,status,progress,phase,page_count,created_at,content_type,reading_direction,default_reading_mode) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, title, comic.Status, comic.Progress, comic.Phase, 0, created.Format(time.RFC3339Nano), contentType, direction, mode); err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "Could not save comic metadata.")
 		return
 	}
 	removeUpload = false
-	go a.processComic(id, extension, tmpArchivePath)
+	go a.processComic(id, extension, tmpArchivePath, direction)
 	writeJSON(w, http.StatusAccepted, comic)
 }
 
-func (a *App) processComic(id, extension, uploadPath string) {
+func (a *App) processComic(id, extension, uploadPath, direction string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	defer os.Remove(uploadPath)
@@ -438,7 +483,8 @@ func (a *App) processComic(id, extension, uploadPath string) {
 			err = pathErr
 			break
 		}
-		pages[i].frames, err = a.detectPanelsFile(ctx, path, id, pages[i].Number, "ltr")
+		pages[i].frames, err = a.detectPanelsFile(ctx, path, id, pages[i].Number, direction)
+		pages[i].report = buildDetectionReport(pages[i].frames)
 		if err != nil {
 			break
 		}
@@ -459,7 +505,8 @@ func (a *App) processComic(id, extension, uploadPath string) {
 			break
 		}
 		var pageID int64
-		result, insertErr := tx.ExecContext(ctx, `INSERT INTO pages(comic_id,number,image_path,width,height,media_type) VALUES(?,?,?,?,?,?)`, id, page.Number, page.path, page.Width, page.Height, page.MediaType)
+		reportJSON, _ := json.Marshal(page.report)
+		result, insertErr := tx.ExecContext(ctx, `INSERT INTO pages(comic_id,number,image_path,width,height,media_type,review_status,detection_report_json) VALUES(?,?,?,?,?,?,?,?)`, id, page.Number, page.path, page.Width, page.Height, page.MediaType, reviewStatusForReport(page.report), reportJSON)
 		if insertErr != nil {
 			err = insertErr
 			continue
@@ -501,6 +548,7 @@ type extractedPage struct {
 	Number, Width, Height int
 	MediaType, path       string
 	frames                []Panel
+	report                DetectionReport
 }
 
 func temporaryPagePath(tmpDir, comicID, finalRelative string) (string, error) {
@@ -604,7 +652,7 @@ func (a *App) extractCBZProgress(archivePath, destination, comicID string, progr
 }
 
 func (a *App) listComics(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id,title,status,progress,phase,COALESCE(error_message,''),page_count,created_at FROM comics ORDER BY created_at DESC LIMIT 100`)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id,title,status,progress,phase,COALESCE(error_message,''),page_count,created_at,content_type,reading_direction,default_reading_mode FROM comics ORDER BY created_at DESC LIMIT 100`)
 	if err != nil {
 		writeError(w, 500, "database_error", "Could not list comics.")
 		return
@@ -614,7 +662,7 @@ func (a *App) listComics(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c Comic
 		var created string
-		if err := rows.Scan(&c.ID, &c.Title, &c.Status, &c.Progress, &c.Phase, &c.ErrorMessage, &c.PageCount, &created); err != nil {
+		if err := rows.Scan(&c.ID, &c.Title, &c.Status, &c.Progress, &c.Phase, &c.ErrorMessage, &c.PageCount, &created, &c.ContentType, &c.ReadingDirection, &c.DefaultReadingMode); err != nil {
 			writeError(w, 500, "database_error", "Could not list comics.")
 			return
 		}
@@ -665,7 +713,7 @@ func (a *App) deleteComic(w http.ResponseWriter, r *http.Request) {
 func (a *App) comic(ctx context.Context, id string) (Comic, error) {
 	var c Comic
 	var created string
-	err := a.db.QueryRowContext(ctx, `SELECT id,title,status,progress,phase,COALESCE(error_message,''),page_count,created_at FROM comics WHERE id=?`, id).Scan(&c.ID, &c.Title, &c.Status, &c.Progress, &c.Phase, &c.ErrorMessage, &c.PageCount, &created)
+	err := a.db.QueryRowContext(ctx, `SELECT id,title,status,progress,phase,COALESCE(error_message,''),page_count,created_at,content_type,reading_direction,default_reading_mode FROM comics WHERE id=?`, id).Scan(&c.ID, &c.Title, &c.Status, &c.Progress, &c.Phase, &c.ErrorMessage, &c.PageCount, &created, &c.ContentType, &c.ReadingDirection, &c.DefaultReadingMode)
 	c.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	if c.PageCount > 0 && c.Status == "ready" {
 		c.CoverURL = fmt.Sprintf("/api/v1/comics/%s/pages/1/image", c.ID)
@@ -676,7 +724,7 @@ func (a *App) comic(ctx context.Context, id string) (Comic, error) {
 func (a *App) listPages(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "comicID")
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT p.number,p.width,p.height,p.media_type,p.revision,p.frame_setup_complete,
+		SELECT p.number,p.width,p.height,p.media_type,p.revision,p.frame_setup_complete,p.review_status,p.detection_report_json,
 		f.id,f.name,f."order",f.shape_type,f.frame_type,f.x,f.y,f.width,f.height,f.polygon_json,f.fit_mode,f.padding_percent,f.mask_opacity,f.transition_duration_ms,f.easing,f.is_enabled,f.source,f.confidence,f.model_version,f.created_at,f.updated_at
 		FROM pages p LEFT JOIN panels f ON f.page_id=p.id
 		WHERE p.comic_id=? ORDER BY p.number,f."order"`, id)
@@ -691,16 +739,19 @@ func (a *App) listPages(w http.ResponseWriter, r *http.Request) {
 		var mediaType string
 		var revision int
 		var setup bool
+		var reviewStatus, reportJSON string
 		var panelID, panelOrder, transition sql.NullInt64
 		var name, shapeType, frameType, polygon, fitMode, easing, source, modelVersion, created, updated sql.NullString
 		var x, y, panelWidth, panelHeight, padding, opacity, confidence sql.NullFloat64
 		var enabled sql.NullBool
-		if err := rows.Scan(&number, &width, &height, &mediaType, &revision, &setup, &panelID, &name, &panelOrder, &shapeType, &frameType, &x, &y, &panelWidth, &panelHeight, &polygon, &fitMode, &padding, &opacity, &transition, &easing, &enabled, &source, &confidence, &modelVersion, &created, &updated); err != nil {
+		if err := rows.Scan(&number, &width, &height, &mediaType, &revision, &setup, &reviewStatus, &reportJSON, &panelID, &name, &panelOrder, &shapeType, &frameType, &x, &y, &panelWidth, &panelHeight, &polygon, &fitMode, &padding, &opacity, &transition, &easing, &enabled, &source, &confidence, &modelVersion, &created, &updated); err != nil {
 			writeError(w, 500, "database_error", "Could not list pages.")
 			return
 		}
 		if len(pages) == 0 || pages[len(pages)-1].Number != number {
-			pages = append(pages, Page{Number: number, Width: width, Height: height, MediaType: mediaType, ImageURL: fmt.Sprintf("/api/v1/comics/%s/pages/%d/image", id, number), Panels: []Panel{}, Frames: []Panel{}, Revision: revision, FrameSetupComplete: setup})
+			page := Page{Number: number, Width: width, Height: height, MediaType: mediaType, ImageURL: fmt.Sprintf("/api/v1/comics/%s/pages/%d/image", id, number), Panels: []Panel{}, Frames: []Panel{}, Revision: revision, FrameSetupComplete: setup, ReviewStatus: reviewStatus}
+			_ = json.Unmarshal([]byte(reportJSON), &page.DetectionReport)
+			pages = append(pages, page)
 		}
 		if panelID.Valid {
 			frame := Panel{ID: panelID.Int64, Name: name.String, Order: int(panelOrder.Int64), ShapeType: shapeType.String, FrameType: frameType.String, X: x.Float64, Y: y.Float64, Width: panelWidth.Float64, Height: panelHeight.Float64, Polygon: []Point{}, FitMode: fitMode.String, PaddingPercent: padding.Float64, MaskOpacity: opacity.Float64, TransitionDurationMS: int(transition.Int64), Easing: easing.String, IsEnabled: enabled.Bool, Source: source.String, Confidence: confidence.Float64, ModelVersion: modelVersion.String}
@@ -728,7 +779,8 @@ func (a *App) getFrames(w http.ResponseWriter, r *http.Request) {
 	}
 	var pageID int64
 	var revision int
-	if err := a.db.QueryRowContext(r.Context(), `SELECT id,revision FROM pages WHERE comic_id=? AND number=?`, chi.URLParam(r, "comicID"), number).Scan(&pageID, &revision); errors.Is(err, sql.ErrNoRows) {
+	var reviewStatus, reportJSON string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT id,revision,review_status,detection_report_json FROM pages WHERE comic_id=? AND number=?`, chi.URLParam(r, "comicID"), number).Scan(&pageID, &revision, &reviewStatus, &reportJSON); errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "Page not found.")
 		return
 	} else if err != nil {
@@ -740,7 +792,9 @@ func (a *App) getFrames(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database_error", "Could not load frames.")
 		return
 	}
-	writeJSON(w, http.StatusOK, framesResponse{Revision: revision, Frames: frames})
+	var report DetectionReport
+	_ = json.Unmarshal([]byte(reportJSON), &report)
+	writeJSON(w, http.StatusOK, framesResponse{Revision: revision, Frames: frames, ReviewStatus: reviewStatus, DetectionReport: report})
 }
 
 type queryer interface {
@@ -824,7 +878,7 @@ func (a *App) replaceFrames(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `UPDATE pages SET revision=revision+1,frame_setup_complete=1 WHERE id=?`, pageID)
+		_, err = tx.ExecContext(r.Context(), `UPDATE pages SET revision=revision+1,frame_setup_complete=1,review_status=CASE WHEN review_status='approved' THEN 'approved' ELSE 'manually_corrected' END WHERE id=?`, pageID)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -964,7 +1018,7 @@ func (a *App) addFullPageFrame(w http.ResponseWriter, r *http.Request) {
 		err = insertFrame(r.Context(), tx, pageID, &frame)
 	}
 	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `UPDATE pages SET revision=revision+1,frame_setup_complete=1 WHERE id=?`, pageID)
+		_, err = tx.ExecContext(r.Context(), `UPDATE pages SET revision=revision+1,frame_setup_complete=1,review_status=CASE WHEN review_status='approved' THEN 'approved' ELSE 'manually_corrected' END WHERE id=?`, pageID)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -986,11 +1040,12 @@ func (a *App) getProgress(w http.ResponseWriter, r *http.Request) {
 	var updated string
 	err := a.db.QueryRowContext(r.Context(), `SELECT page,frame,mode,direction,updated_at FROM reading_progress WHERE comic_id=?`, chi.URLParam(r, "comicID")).Scan(&progress.Page, &progress.Frame, &progress.Mode, &progress.Direction, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, comicErr := a.comic(r.Context(), chi.URLParam(r, "comicID")); errors.Is(comicErr, sql.ErrNoRows) {
+		comic, comicErr := a.comic(r.Context(), chi.URLParam(r, "comicID"))
+		if errors.Is(comicErr, sql.ErrNoRows) {
 			writeError(w, 404, "not_found", "Comic not found.")
 			return
 		}
-		writeJSON(w, http.StatusOK, ReadingProgress{Page: 1, Frame: 1, Mode: "panel", Direction: "ltr"})
+		writeJSON(w, http.StatusOK, ReadingProgress{Page: 1, Frame: 1, Mode: comic.DefaultReadingMode, Direction: comic.ReadingDirection})
 		return
 	}
 	if err != nil {
@@ -1084,6 +1139,9 @@ func (a *App) replacePanels(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			panels[i].ID, err = result.LastInsertId()
 		}
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `UPDATE pages SET revision=revision+1,frame_setup_complete=1,review_status=CASE WHEN review_status='approved' THEN 'approved' ELSE 'manually_corrected' END WHERE id=?`, pageID)
 	}
 	if err == nil {
 		err = tx.Commit()

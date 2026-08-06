@@ -47,15 +47,16 @@ func (a *App) detectPanelsFile(ctx context.Context, path, comicID string, page i
 	if strings.TrimSpace(a.config.PanelDetectorURL) != "" {
 		frames, err := a.detectPanelsExternal(ctx, path, comicID, page, direction)
 		if err == nil {
-			return frames, nil
+			return postprocessDetectionsWithConfig(frames, direction, a.config, true), nil
 		}
 		a.logger.Warn("external panel detection failed; using Go detector", "comic_id", comicID, "page", page, "error", err)
 	}
-	return detectPanelsFile(ctx, path)
+	frames, err := detectPanelsFile(ctx, path)
+	return postprocessDetectionsWithConfig(frames, direction, a.config, false), err
 }
 
 func (a *App) detectPanelsExternal(ctx context.Context, path, comicID string, page int, direction string) ([]Panel, error) {
-	if direction != "ltr" && direction != "rtl" {
+	if direction != "ltr" && direction != "rtl" && direction != "vertical" {
 		return nil, errors.New("invalid reading direction")
 	}
 	absolutePath, err := filepath.Abs(path)
@@ -132,18 +133,55 @@ func validateExternalDetection(result externalDetectionResponse, direction strin
 }
 
 func sortDetectedPanels(frames []Panel, direction string) {
-	sort.SliceStable(frames, func(i, j int) bool {
-		left, right := frames[i], frames[j]
-		leftCenter, rightCenter := left.Y+left.Height/2, right.Y+right.Height/2
-		tolerance := math.Min(left.Height, right.Height) / 3
-		if math.Abs(leftCenter-rightCenter) > tolerance {
-			return leftCenter < rightCenter
+	if direction == "vertical" {
+		sort.SliceStable(frames, func(i, j int) bool {
+			if frames[i].Y != frames[j].Y {
+				return frames[i].Y < frames[j].Y
+			}
+			return frames[i].X < frames[j].X
+		})
+	} else {
+		type panelRow struct {
+			top       float64
+			minHeight float64
+			frames    []Panel
 		}
-		if direction == "rtl" {
-			return left.X > right.X
+		sort.SliceStable(frames, func(i, j int) bool {
+			if frames[i].Y != frames[j].Y {
+				return frames[i].Y < frames[j].Y
+			}
+			return frames[i].X < frames[j].X
+		})
+		rows := make([]panelRow, 0, len(frames))
+		for _, frame := range frames {
+			rowIndex := -1
+			bestDistance := math.MaxFloat64
+			for i := range rows {
+				tolerance := math.Max(.015, math.Min(rows[i].minHeight, frame.Height)*.4)
+				distance := math.Abs(frame.Y - rows[i].top)
+				if distance <= tolerance && distance < bestDistance {
+					rowIndex, bestDistance = i, distance
+				}
+			}
+			if rowIndex < 0 {
+				rows = append(rows, panelRow{top: frame.Y, minHeight: frame.Height, frames: []Panel{frame}})
+				continue
+			}
+			rows[rowIndex].frames = append(rows[rowIndex].frames, frame)
+			rows[rowIndex].minHeight = math.Min(rows[rowIndex].minHeight, frame.Height)
 		}
-		return left.X < right.X
-	})
+		ordered := make([]Panel, 0, len(frames))
+		for _, row := range rows {
+			sort.SliceStable(row.frames, func(i, j int) bool {
+				if direction == "rtl" {
+					return row.frames[i].X > row.frames[j].X
+				}
+				return row.frames[i].X < row.frames[j].X
+			})
+			ordered = append(ordered, row.frames...)
+		}
+		copy(frames, ordered)
+	}
 	for i := range frames {
 		frames[i].Order = i + 1
 		frames[i].Name = fmt.Sprintf("Detected panel %d", i+1)

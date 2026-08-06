@@ -6,7 +6,7 @@ services:
     ports:
       - "8090:8090"
     environment:
-      PANEL_AI_PROVIDER: ${PANEL_AI_PROVIDER:-roboflow}
+      PANEL_AI_PROVIDER: ${PANEL_AI_PROVIDER:-roboflow_hybrid}
       PANEL_MODEL_PATH: /models/comic-panel-seg.pt
       PANEL_MODEL_VERSION: ${PANEL_MODEL_VERSION:-comic-panel-seg-v1}
       PANEL_ALLOWED_IMAGE_ROOTS: /data
@@ -17,6 +17,10 @@ services:
       ROBOFLOW_API_KEY: ${ROBOFLOW_API_KEY:-}
       ROBOFLOW_MODEL_ID: ${ROBOFLOW_MODEL_ID:-comic-panel-detectors/7}
       ROBOFLOW_PANEL_CLASSES: ${ROBOFLOW_PANEL_CLASSES:-panel,panels}
+      ROBOFLOW_WORKSPACE: ${ROBOFLOW_WORKSPACE:-adil-mubarak}
+      ROBOFLOW_WORKFLOW_ID: ${ROBOFLOW_WORKFLOW_ID:-general-segmentation-api-12}
+      ROBOFLOW_WORKFLOW_CLASSES: ${ROBOFLOW_WORKFLOW_CLASSES:-Cover, Panels}
+      ROBOFLOW_MASK_MATCH_IOU: ${ROBOFLOW_MASK_MATCH_IOU:-0.30}
     volumes:
       - ./storage:/data:ro
       - ./models:/models:ro
