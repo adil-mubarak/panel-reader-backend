@@ -1,7 +1,8 @@
-path: /datasets/comic-panels
-train: images/train
-val: images/val
-test: images/test
+# Set this relative to this YAML file, or use an absolute extracted-dataset path.
+path: ../datasets/comic-panels
+train: train/images
+val: valid/images
+test: test/images
 
 names:
   0: panel

@@ -22,6 +22,7 @@ type externalDetectionRequest struct {
 	Page             int    `json:"page,omitempty"`
 	ImagePath        string `json:"imagePath"`
 	ReadingDirection string `json:"readingDirection"`
+	ContentType      string `json:"contentType"`
 }
 
 type externalBoundingBox struct {
@@ -44,9 +45,9 @@ type externalDetectionResponse struct {
 	Panels       []externalPanel `json:"panels"`
 }
 
-func (a *App) detectPanelsFile(ctx context.Context, path, comicID string, page int, direction string) ([]Panel, error) {
+func (a *App) detectPanelsFile(ctx context.Context, path, comicID string, page int, direction, contentType string) ([]Panel, error) {
 	if strings.TrimSpace(a.config.PanelDetectorURL) != "" {
-		frames, err := a.detectPanelsExternal(ctx, path, comicID, page, direction)
+		frames, err := a.detectPanelsExternal(ctx, path, comicID, page, direction, contentType)
 		if err == nil {
 			ai := postprocessDetectionsWithConfig(frames, direction, a.config, true)
 			structural, structuralErr := detectPanelsFile(ctx, path)
@@ -198,9 +199,12 @@ func nonOverlappingStructural(indices []int, frames []Panel) bool {
 	return true
 }
 
-func (a *App) detectPanelsExternal(ctx context.Context, path, comicID string, page int, direction string) ([]Panel, error) {
+func (a *App) detectPanelsExternal(ctx context.Context, path, comicID string, page int, direction, contentType string) ([]Panel, error) {
 	if direction != "ltr" && direction != "rtl" && direction != "vertical" {
 		return nil, errors.New("invalid reading direction")
+	}
+	if contentType != "comic" && contentType != "manga" && contentType != "webtoon" {
+		return nil, errors.New("invalid content type")
 	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
@@ -215,7 +219,7 @@ func (a *App) detectPanelsExternal(ctx context.Context, path, comicID string, pa
 		}
 		requestPath = filepath.Join(a.config.PanelDetectorRoot, relative)
 	}
-	payload, err := json.Marshal(externalDetectionRequest{ComicID: comicID, Page: page, ImagePath: requestPath, ReadingDirection: direction})
+	payload, err := json.Marshal(externalDetectionRequest{ComicID: comicID, Page: page, ImagePath: requestPath, ReadingDirection: direction, ContentType: contentType})
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,12 @@ The reader keeps a bounded decoded-page cache, crossfades already-decoded pages,
 
 Optional custom instance-segmentation is provided by `ai-service/`. See `ai-service/README.md` for model training, licensing, and runtime setup. Without a configured AI checkpoint, the Go backend uses its built-in gutter detector.
 
+Hosted detection selects `comic-panel-detectors/7` for Comic imports and the `manga-test/2` specialist for Manga imports. Both continue through polygon refinement and structural recovery.
+
+For local YOLO, run `make dataset-validate DATASET=/path/to/data.yaml`, `make train-ai DATASET=/path/to/data.yaml`, then `make ai-local`. Training requires an authorised dataset and appropriate hardware; no dataset or model weights are bundled.
+
+Roboflow exports with extra classes can be normalized first with `make dataset-prepare DATASET_SOURCE=/path/to/export DATASET_OUTPUT=/path/to/normalized`.
+
 The frame editor includes conservative splash/no-panel fallback, adaptive rectangle/polygon output, and hybrid completeness checks. When hosted AI omits a bordered panel, the backend also runs its structural detector, recovers reliable missing candidates, and reports AI, structural, and recovered counts for creator review. Existing pages can be reprocessed with **Auto detect**.
 
 The editor also includes detection quality warnings, split/merge tools, page approval, and approved-page YOLO/COCO exports for building an authorised correction dataset.

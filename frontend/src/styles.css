@@ -118,7 +118,7 @@ h1 em { color: #d69a62; }
 .frame-properties { border-top: 1px solid #39342e; display: grid; flex: 0 0 auto; gap: .65rem; padding-top: .8rem; }
 .frame-properties label { color: #a79f96; display: grid; font-size: .7rem; gap: .28rem; text-transform: uppercase; }
 .frame-properties input, .frame-properties select { background: #0e0d0b; border: 1px solid #403932; color: #eee7dc; min-width: 0; padding: .45rem; }
-.frame-properties input[type="range"] { accent-color: #d69a62; padding: 0; }
+.frame-properties input[type="range"] { accent-color: #d69a62; box-sizing: border-box; margin-inline: .5rem; padding: 0; width: calc(100% - 1rem); }
 .frame-properties output { color: #d69a62; justify-self: end; }
 .frame-properties .check-label { align-items: center; display: flex; }
 .detection-confidence { background: #0e0d0b; border: 1px solid #403932; display: grid; gap: .25rem; padding: .65rem; }

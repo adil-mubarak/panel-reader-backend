@@ -2,3 +2,4 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 pillow==11.3.0
 inference-sdk>=0.50.0,<1.0.0
+PyYAML==6.0.2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from threading import Lock
 from typing import Literal
@@ -8,12 +9,15 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+ContentType = Literal["comic", "manga", "webtoon"]
+
 
 class DetectionRequest(BaseModel):
     comicId: str = Field(min_length=1, max_length=200)
     page: int = Field(ge=1)
     imagePath: str = Field(min_length=1)
     readingDirection: Literal["ltr", "rtl", "vertical"] = "ltr"
+    contentType: ContentType = "comic"
 
 
 class Point(BaseModel):
@@ -67,15 +71,15 @@ class ModelRuntime:
                 self._model = YOLO(str(self.model_path))
         return self._model
 
-    def detect(self, image_path: Path) -> DetectionResponse:
+    def detect(self, image_path: Path, content_type: ContentType = "comic") -> DetectionResponse:
         if self.provider == "roboflow":
             if os.environ.get("ROBOFLOW_WORKFLOW_ID", "").strip():
-                return self.detect_roboflow_hybrid(image_path)
-            return self.detect_roboflow(image_path)
+                return self.detect_roboflow_hybrid(image_path, content_type)
+            return self.detect_roboflow(image_path, content_type)
         if self.provider == "roboflow_workflow":
-            return self.detect_roboflow_workflow(image_path)
+            return self.detect_roboflow_workflow(image_path, content_type)
         if self.provider == "roboflow_hybrid":
-            return self.detect_roboflow_hybrid(image_path)
+            return self.detect_roboflow_hybrid(image_path, content_type)
         if self.provider != "local":
             raise RuntimeError(f"unsupported panel AI provider: {self.provider}")
         return self.detect_local(image_path)
@@ -152,18 +156,16 @@ class ModelRuntime:
                 )
         return self._roboflow_client
 
-    def detect_roboflow(self, image_path: Path) -> DetectionResponse:
+    def detect_roboflow(self, image_path: Path, content_type: ContentType = "comic") -> DetectionResponse:
         from PIL import Image
 
         with Image.open(image_path) as image:
             width, height = image.size
-        model_id = os.environ.get("ROBOFLOW_MODEL_ID", "comic-panel-detectors/7").strip()
-        if not model_id:
-            raise RuntimeError("ROBOFLOW_MODEL_ID is not configured")
+        model_id = roboflow_model_id(content_type)
         result = self.roboflow_client().infer(str(image_path), model_id=model_id)
-        return convert_roboflow_result(result, width, height, model_id)
+        return convert_roboflow_result(result, width, height, model_id, roboflow_panel_classes(content_type))
 
-    def detect_roboflow_workflow(self, image_path: Path) -> DetectionResponse:
+    def detect_roboflow_workflow(self, image_path: Path, content_type: ContentType = "comic") -> DetectionResponse:
         from PIL import Image
 
         with Image.open(image_path) as image:
@@ -176,22 +178,22 @@ class ModelRuntime:
             workspace_name=workspace,
             workflow_id=workflow_id,
             images={"image": str(image_path)},
-            parameters={"classes": os.environ.get("ROBOFLOW_WORKFLOW_CLASSES", "Cover, Panels")},
+            parameters={"classes": roboflow_workflow_classes(content_type)},
             use_cache=True,
         )
         return convert_roboflow_workflow_result(result, width, height, workspace, workflow_id)
 
-    def detect_roboflow_hybrid(self, image_path: Path) -> DetectionResponse:
+    def detect_roboflow_hybrid(self, image_path: Path, content_type: ContentType = "comic") -> DetectionResponse:
         boxes: DetectionResponse | None = None
         masks: DetectionResponse | None = None
         box_error: Exception | None = None
         mask_error: Exception | None = None
         try:
-            boxes = self.detect_roboflow(image_path)
+            boxes = self.detect_roboflow(image_path, content_type)
         except Exception as error:
             box_error = error
         try:
-            masks = self.detect_roboflow_workflow(image_path)
+            masks = self.detect_roboflow_workflow(image_path, content_type)
         except Exception as error:
             mask_error = error
         if boxes and masks:
@@ -218,7 +220,36 @@ def simplify_polygon(points, width: int, height: int) -> list[Point]:
     ]
 
 
-def convert_roboflow_result(result: object, width: int, height: int, model_id: str) -> DetectionResponse:
+def roboflow_model_id(content_type: ContentType) -> str:
+    comic = os.environ.get("ROBOFLOW_COMIC_MODEL_ID", "").strip() or os.environ.get("ROBOFLOW_MODEL_ID", "").strip() or "comic-panel-detectors/7"
+    if content_type == "manga":
+        return os.environ.get("ROBOFLOW_MANGA_MODEL_ID", "").strip() or "manga-test/2"
+    if content_type == "webtoon":
+        return os.environ.get("ROBOFLOW_WEBTOON_MODEL_ID", "").strip() or comic
+    return comic
+
+
+def roboflow_panel_classes(content_type: ContentType) -> str:
+    comic = os.environ.get("ROBOFLOW_COMIC_PANEL_CLASSES", "").strip() or os.environ.get("ROBOFLOW_PANEL_CLASSES", "panel,panels")
+    if content_type == "manga":
+        return os.environ.get("ROBOFLOW_MANGA_PANEL_CLASSES", "").strip() or "manga-panel"
+    if content_type == "webtoon":
+        return os.environ.get("ROBOFLOW_WEBTOON_PANEL_CLASSES", "").strip() or comic
+    return comic
+
+
+def roboflow_workflow_classes(content_type: ContentType) -> str:
+    specific = os.environ.get(f"ROBOFLOW_{content_type.upper()}_WORKFLOW_CLASSES", "").strip()
+    return specific or os.environ.get("ROBOFLOW_WORKFLOW_CLASSES", "Cover, Panels")
+
+
+def convert_roboflow_result(
+    result: object,
+    width: int,
+    height: int,
+    model_id: str,
+    class_allowlist: str | Iterable[str] | None = None,
+) -> DetectionResponse:
     if not isinstance(result, dict):
         raise RuntimeError("Roboflow returned an invalid response")
     image = result.get("image")
@@ -229,9 +260,11 @@ def convert_roboflow_result(result: object, width: int, height: int, model_id: s
     if not isinstance(predictions, list):
         raise RuntimeError("Roboflow predictions are invalid")
 
+    allowlist = class_allowlist if class_allowlist is not None else os.environ.get("ROBOFLOW_PANEL_CLASSES", "panel,panels")
+    class_names = allowlist.split(",") if isinstance(allowlist, str) else allowlist
     configured_classes = {
         value.strip().casefold()
-        for value in os.environ.get("ROBOFLOW_PANEL_CLASSES", "panel,panels").split(",")
+        for value in class_names
         if value.strip()
     }
     threshold = float(os.environ.get("PANEL_CONFIDENCE", "0.25"))
@@ -432,7 +465,7 @@ def health() -> dict[str, str | bool]:
             "status": "ok" if configured else "credentials_missing",
             "provider": runtime.provider,
             "modelConfigured": configured,
-            "modelVersion": f"roboflow/{os.environ.get('ROBOFLOW_MODEL_ID', 'comic-panel-detectors/7')}+workflow/{os.environ.get('ROBOFLOW_WORKFLOW_ID', '')}",
+            "modelVersion": f"comic=roboflow/{roboflow_model_id('comic')};manga=roboflow/{roboflow_model_id('manga')};workflow={os.environ.get('ROBOFLOW_WORKFLOW_ID', '')}",
         }
     return {
         "status": "ok" if runtime.model_path.is_file() else "model_missing",
@@ -446,7 +479,7 @@ def health() -> dict[str, str | bool]:
 def panel_detection(request: DetectionRequest) -> DetectionResponse:
     path = safe_image_path(request.imagePath)
     try:
-        return runtime.detect(path)
+        return runtime.detect(path, request.contentType)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:

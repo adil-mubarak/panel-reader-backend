@@ -445,11 +445,11 @@ func (a *App) uploadComic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removeUpload = false
-	go a.processComic(id, extension, tmpArchivePath, direction)
+	go a.processComic(id, extension, tmpArchivePath, direction, contentType)
 	writeJSON(w, http.StatusAccepted, comic)
 }
 
-func (a *App) processComic(id, extension, uploadPath, direction string) {
+func (a *App) processComic(id, extension, uploadPath, direction, contentType string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	defer os.Remove(uploadPath)
@@ -483,7 +483,7 @@ func (a *App) processComic(id, extension, uploadPath, direction string) {
 			err = pathErr
 			break
 		}
-		pages[i].frames, err = a.detectPanelsFile(ctx, path, id, pages[i].Number, direction)
+		pages[i].frames, err = a.detectPanelsFile(ctx, path, id, pages[i].Number, direction, contentType)
 		pages[i].report = buildDetectionReport(pages[i].frames)
 		if err != nil {
 			break

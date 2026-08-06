@@ -1857,6 +1857,8 @@ type Detector interface {
 
 Do not select ML until failure cases have been collected and categorized.
 
+The optional local ML workflow uses one-class YOLO instance segmentation and must validate exported polygon labels before training. Training data must be authorised, split by comic to avoid leakage, and reviewed for its intended panel inclusion rules. Dataset validation, training, checkpoint installation, local Compose inference, and Ultralytics AGPL licensing are documented in `ai-service/README.md`; automatic detection remains a fallible creator-reviewed suggestion.
+
 ---
 
 ## 30. Background Processing
@@ -2415,6 +2417,8 @@ The current detector is implemented in pure Go and does not require OpenCV. It:
 10. Falls back to one full-page frame when no reliable split is found.
 
 AI output is accepted conservatively using confidence, coverage, overlap, and reliable-region thresholds. A successful AI response is now combined with a second structural gutter pass: reliable structural regions omitted by AI are recovered, oversized AI regions may be replaced by a verified structural partition, and duplicate or nested candidates are suppressed. Structural recovery scores visual activity across a region grid and rejects thin or locally active caption-like regions, while retaining compact illustrated inset panels. Detector disagreement stores AI, structural, and recovered candidate counts, marks the page `review_recommended`, and is visible in the frame editor. Uncertain, splash, and no-panel pages receive one full-page frame rather than an invented sequence. Segmentation masks are simplified and retained as polygons only when meaningfully irregular; rectangular or invalid masks become rectangles. The pure-Go detector has a synthetic calibration harness, including a one-top/three-middle/three-bottom seven-panel fixture, that reports precision, recall, and mean IoU without presenting calibration as ML training.
+
+Hosted candidate-box selection is content-type specific: Comic uses `comic-panel-detectors/7`, Manga uses `manga-test/2`, and Webtoon uses a configured specialist or falls back to the Comic model. The backend sends explicit content type rather than inferring Manga from RTL. Specialist boxes continue through the shared segmentation workflow and structural recovery.
 
 Detection progress is stored using the `detecting panels` processing phase.
 
