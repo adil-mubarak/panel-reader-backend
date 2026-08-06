@@ -69,6 +69,9 @@ func TestUploadComicAndReadPages(t *testing.T) {
 	archive := comicArchive(t, []string{"10.png", "2.png", "1.png"})
 	var requestBody bytes.Buffer
 	writer := multipart.NewWriter(&requestBody)
+	if err := writer.WriteField("content_type", "manga"); err != nil {
+		t.Fatal(err)
+	}
 	part, err := writer.CreateFormFile("file", "Example.cbz")
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +96,9 @@ func TestUploadComicAndReadPages(t *testing.T) {
 	}
 	if comic.Status != "processing" || comic.Progress != 0 || comic.Phase != "queued" {
 		t.Fatalf("initial comic = %#v", comic)
+	}
+	if comic.ContentType != "manga" || comic.ReadingDirection != "rtl" || comic.DefaultReadingMode != "panel" {
+		t.Fatalf("comic metadata = %#v", comic)
 	}
 	comic = waitForComic(t, a, comic.ID, "ready")
 	if comic.PageCount != 3 || comic.Progress != 100 || comic.Phase != "ready" {
@@ -299,7 +305,7 @@ func TestMigrateExistingDatabaseAddsProgressColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if comic.Progress != 100 || comic.Phase != "ready" {
+	if comic.Progress != 100 || comic.Phase != "ready" || comic.ContentType != "comic" || comic.ReadingDirection != "ltr" || comic.DefaultReadingMode != "panel" {
 		t.Fatalf("migrated comic = %#v", comic)
 	}
 }

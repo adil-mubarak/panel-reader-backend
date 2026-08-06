@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,15 +22,20 @@ func main() {
 	detectorTimeout := envDuration("PANEL_READER_AI_TIMEOUT", 30*time.Second, logger)
 
 	application, err := app.New(app.Config{
-		StorageRoot:          storageRoot,
-		DatabasePath:         databasePath,
-		MaxUpload:            1 << 30,
-		MaxEntries:           2000,
-		MaxExtracted:         4 << 30,
-		MaxFile:              100 << 20,
-		PanelDetectorURL:     os.Getenv("PANEL_READER_AI_URL"),
-		PanelDetectorTimeout: detectorTimeout,
-		PanelDetectorRoot:    os.Getenv("PANEL_READER_AI_STORAGE_ROOT"),
+		StorageRoot:                    storageRoot,
+		DatabasePath:                   databasePath,
+		MaxUpload:                      1 << 30,
+		MaxEntries:                     2000,
+		MaxExtracted:                   4 << 30,
+		MaxFile:                        100 << 20,
+		PanelDetectorURL:               os.Getenv("PANEL_READER_AI_URL"),
+		PanelDetectorTimeout:           detectorTimeout,
+		PanelDetectorRoot:              os.Getenv("PANEL_READER_AI_STORAGE_ROOT"),
+		DetectionConfidenceThreshold:   envFloat("PANEL_READER_DETECTION_CONFIDENCE", .25, logger),
+		DetectionReliableConfidence:    envFloat("PANEL_READER_DETECTION_RELIABLE_CONFIDENCE", .55, logger),
+		DetectionMinCoverage:           envFloat("PANEL_READER_DETECTION_MIN_COVERAGE", .35, logger),
+		DetectionMaxOverlap:            envFloat("PANEL_READER_DETECTION_MAX_OVERLAP", .35, logger),
+		DetectionPolygonRectangularity: envFloat("PANEL_READER_POLYGON_RECTANGULARITY", .9, logger),
 	}, logger)
 	if err != nil {
 		logger.Error("initialize application", "error", err)
@@ -62,6 +68,19 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown", "error", err)
 	}
+}
+
+func envFloat(name string, fallback float64, logger *slog.Logger) float64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 || parsed > 1 {
+		logger.Warn("invalid float environment variable", "name", name, "value", value)
+		return fallback
+	}
+	return parsed
 }
 
 func envDuration(name string, fallback time.Duration, logger *slog.Logger) time.Duration {

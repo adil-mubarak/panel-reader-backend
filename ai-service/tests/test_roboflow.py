@@ -4,7 +4,16 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app.main import convert_roboflow_result, safe_image_path
+from app.main import (
+    BoundingBox,
+    DetectedPanel,
+    DetectionResponse,
+    Point,
+    convert_roboflow_result,
+    convert_roboflow_workflow_result,
+    refine_detections,
+    safe_image_path,
+)
 
 
 class RoboflowConversionTests(unittest.TestCase):
@@ -48,6 +57,33 @@ class RoboflowConversionTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as raised:
                 safe_image_path("/data/comics/page.jpg")
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_converts_nested_workflow_polygon(self):
+        result = [{
+            "segmentation": {
+                "image": {"width": 200, "height": 400},
+                "predictions": [{
+                    "class_name": "Panels",
+                    "score": 0.88,
+                    "polygon": [[20, 40], [180, 40], [170, 200], [30, 200]],
+                }],
+            },
+        }]
+        response = convert_roboflow_workflow_result(result, 200, 400, "adil-mubarak", "general-segmentation-api-12")
+        self.assertEqual(len(response.panels), 1)
+        self.assertEqual(len(response.panels[0].polygon), 4)
+        self.assertAlmostEqual(response.panels[0].boundingBox.x, 0.1)
+        self.assertAlmostEqual(response.panels[0].boundingBox.height, 0.4)
+
+    def test_hybrid_refines_box_with_matching_mask(self):
+        box = DetectedPanel(confidence=.95, polygon=[], boundingBox=BoundingBox(x=.1, y=.1, width=.4, height=.4))
+        mask = DetectedPanel(confidence=.9, polygon=[Point(x=.1, y=.1), Point(x=.5, y=.12), Point(x=.48, y=.5)], boundingBox=BoundingBox(x=.1, y=.1, width=.4, height=.4))
+        refined = refine_detections(
+            DetectionResponse(width=100, height=100, modelVersion="boxes", panels=[box]),
+            DetectionResponse(width=100, height=100, modelVersion="masks", panels=[mask]),
+        )
+        self.assertEqual(len(refined.panels[0].polygon), 3)
+        self.assertEqual(refined.modelVersion, "boxes+masks")
 
 
 if __name__ == "__main__":

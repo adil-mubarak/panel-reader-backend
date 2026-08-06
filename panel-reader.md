@@ -2388,6 +2388,8 @@ sudo apt install poppler-utils
 
 Imports run asynchronously after the upload completes. The browser reports network-upload progress, then polls persisted backend processing progress through extraction, rendering, detection, and publishing.
 
+The import control requires a reading format: Comic uses LTR panel order, Manga uses RTL panel order, and Webtoon uses vertical order and reading mode. The persisted format can be changed from the reader; only pages containing exclusively detected frames are reordered.
+
 The import control displays:
 
 - Current phase.
@@ -2408,9 +2410,11 @@ The current detector is implemented in pure Go and does not require OpenCV. It:
 5. Recursively splits page regions horizontally and vertically.
 6. Rejects tiny or unreliable regions.
 7. Limits recursion depth and frames per page.
-8. Orders results top-to-bottom and left-to-right.
+8. Orders results LTR for comics, RTL for manga, or strictly top-to-bottom for webtoons.
 9. Converts rectangles into normalized rich frame metadata.
 10. Falls back to one full-page frame when no reliable split is found.
+
+AI output is accepted conservatively using confidence, coverage, overlap, and reliable-region thresholds. Uncertain, splash, and no-panel pages receive one full-page frame rather than an invented sequence. Segmentation masks are simplified and retained as polygons only when meaningfully irregular; rectangular or invalid masks become rectangles. The pure-Go detector has a synthetic calibration harness that reports precision, recall, and mean IoU without presenting calibration as ML training.
 
 Detection progress is stored using the `detecting panels` processing phase.
 
@@ -2522,9 +2526,15 @@ The reader currently supports:
 - Per-frame padding, maximum zoom, duration, and easing.
 - Rectangle and polygon SVG masks.
 - Same-page pan and zoom without reloading the page image.
+- Manual zoom from 25% to 500%, fit-page, fit-width, wheel zoom, and drag/touch pan.
+- Manual zoom preservation across frame navigation with pan reset for each new frame.
+- A bounded five-image decoded LRU and an N-2 through N+2 preload window.
+- Decoded cross-page transitions that keep the outgoing page visible.
+- Direct numeric page jumps, Home/End shortcuts, and transition-speed presets.
 - Direct transition from the final frame to the next page's first frame.
 - Keyboard, button, and tap-zone navigation.
 - LTR and RTL directional controls.
+- Format-independent Previous/Next keys and tap zones with persisted Comic, Manga, and Webtoon frame-order defaults.
 - Reduced-motion behavior.
 - Full-page fallback when enabled frame metadata is missing.
 
@@ -2699,4 +2709,71 @@ CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
 
 Hosted inference sends page images to Roboflow and therefore is not local-first. Review provider pricing, retention, privacy, platform terms, dataset provenance, and underlying comic-image rights before production use.
 
+Hybrid polygon refinement is available with `PANEL_AI_PROVIDER=roboflow_hybrid`. The comic-specific detector first supplies candidate boxes, then `general-segmentation-api-12` supplies masks. Masks replace boxes only when valid and spatially matched using configurable bounding-box IoU. This intentionally preserves rectangles for genuinely rectangular panels and whenever segmentation is missing, malformed, or unrelated to the detected reading region.
+
 The AI container mounts comic storage read-only and must run with a UID/GID able to traverse the host's private storage directories. Compose uses `PANEL_AI_UID` and `PANEL_AI_GID`; `make run ai` sets them from `id -u` and `id -g`. Missing files return `404`, inaccessible files return `403`, and malformed paths return `422` instead of leaking internal exceptions.
+
+### 41.11 Detection Review and Training Loop
+
+All detector results pass through deterministic post-processing before persistence:
+
+- Configurable AI confidence filtering.
+- Tiny-frame rejection.
+- Intersection-over-union duplicate suppression.
+- Near-containment duplicate suppression for detected physical panels.
+- Preservation of intentional nested focus frames.
+- Frame-count limits.
+- Tolerant row grouping and LTR/RTL ordering.
+
+Each page stores a quality report containing panel count, approximate page coverage, average confidence, and warning codes:
+
+```text
+no_panels
+low_confidence
+heavy_overlap
+large_uncovered_area
+too_many_panels
+ambiguous_order
+```
+
+Page review states are:
+
+```text
+unreviewed
+review_recommended
+approved
+manually_corrected
+```
+
+Review APIs:
+
+```text
+POST /api/v1/comics/{comicID}/pages/{pageNumber}/approve
+POST /api/v1/comics/{comicID}/pages/{pageNumber}/unapprove
+```
+
+The creator editor displays quality warnings and supports multi-selection, horizontal and vertical splitting, merging, multi-frame deletion, draggable reading order, page approval, and unapproval.
+
+Only approved pages are included in training exports:
+
+```text
+GET /api/v1/comics/{comicID}/training-export?format=yolo
+GET /api/v1/comics/{comicID}/training-export?format=coco
+```
+
+Exports are streamed ZIP files containing approved page images, a manifest, and either YOLO segmentation labels or COCO annotations. Rectangle frames are converted to four-point polygons. Source, confidence, and model-version metadata are retained where the target format permits it.
+
+The production improvement loop is:
+
+```text
+AI prediction
+  -> deterministic cleanup
+  -> quality warnings
+  -> creator split/merge/correction
+  -> page approval
+  -> licensed training export
+  -> model retraining
+  -> improved future predictions
+```
+
+Reader uploads must never be used for model training without appropriate permission and a documented lawful basis.

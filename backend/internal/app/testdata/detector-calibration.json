@@ -1,0 +1,22 @@
+[
+  {
+    "name": "clear-multi-panel-gutters",
+    "synthetic": {
+      "width": 600,
+      "height": 800,
+      "verticalGutters": [{"start": 290, "end": 310}],
+      "horizontalGutters": [{"start": 390, "end": 410}]
+    },
+    "expected": [
+      {"x": 0, "y": 0, "width": 0.4833333333, "height": 0.4875},
+      {"x": 0.5166666667, "y": 0, "width": 0.4833333333, "height": 0.4875},
+      {"x": 0, "y": 0.5125, "width": 0.4833333333, "height": 0.4875},
+      {"x": 0.5166666667, "y": 0.5125, "width": 0.4833333333, "height": 0.4875}
+    ]
+  },
+  {
+    "name": "splash-no-gutter",
+    "synthetic": {"width": 600, "height": 800},
+    "expected": [{"x": 0, "y": 0, "width": 1, "height": 1}]
+  }
+]

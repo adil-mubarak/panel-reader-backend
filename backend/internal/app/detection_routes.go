@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -31,7 +32,7 @@ func (a *App) detectPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_page", "Page number is invalid.")
 		return
 	}
-	pageID, revision, path, err := a.pageDetectionInfo(r.Context(), chi.URLParam(r, "comicID"), number)
+	pageID, revision, path, direction, err := a.pageDetectionInfo(r.Context(), chi.URLParam(r, "comicID"), number)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "Page not found.")
 		return
@@ -40,7 +41,7 @@ func (a *App) detectPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database_error", "Could not load page.")
 		return
 	}
-	frames, err := a.detectPanelsFile(r.Context(), path, chi.URLParam(r, "comicID"), number, "ltr")
+	frames, err := a.detectPanelsFile(r.Context(), path, chi.URLParam(r, "comicID"), number, direction)
 	if err == nil {
 		revision, err = a.replaceDetectedFrames(r.Context(), pageID, revision, frames, queryReset(r))
 	}
@@ -52,12 +53,13 @@ func (a *App) detectPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "detection_error", "Could not detect panels.")
 		return
 	}
-	writeJSON(w, http.StatusOK, framesResponse{Revision: revision, Frames: frames})
+	report := buildDetectionReport(frames)
+	writeJSON(w, http.StatusOK, framesResponse{Revision: revision, Frames: frames, ReviewStatus: reviewStatusForReport(report), DetectionReport: report})
 }
 
 func (a *App) detectComic(w http.ResponseWriter, r *http.Request) {
 	id, reset := chi.URLParam(r, "comicID"), queryReset(r)
-	rows, err := a.db.QueryContext(r.Context(), `SELECT id,number,image_path,revision FROM pages WHERE comic_id=? ORDER BY number`, id)
+	rows, err := a.db.QueryContext(r.Context(), `SELECT p.id,p.number,p.image_path,p.revision,c.reading_direction FROM pages p JOIN comics c ON c.id=p.comic_id WHERE p.comic_id=? ORDER BY p.number`, id)
 	if err != nil {
 		writeError(w, 500, "database_error", "Could not load pages.")
 		return
@@ -66,11 +68,12 @@ func (a *App) detectComic(w http.ResponseWriter, r *http.Request) {
 		id               int64
 		number, revision int
 		path             string
+		direction        string
 	}
 	var pages []info
 	for rows.Next() {
 		var p info
-		err = rows.Scan(&p.id, &p.number, &p.path, &p.revision)
+		err = rows.Scan(&p.id, &p.number, &p.path, &p.revision, &p.direction)
 		pages = append(pages, p)
 	}
 	err = errors.Join(err, rows.Err(), rows.Close())
@@ -90,7 +93,7 @@ func (a *App) detectComic(w http.ResponseWriter, r *http.Request) {
 		var frames []Panel
 		detectionErr := pathErr
 		if detectionErr == nil {
-			frames, detectionErr = a.detectPanelsFile(r.Context(), path, id, p.number, "ltr")
+			frames, detectionErr = a.detectPanelsFile(r.Context(), path, id, p.number, p.direction)
 		}
 		if detectionErr == nil {
 			p.revision, detectionErr = a.replaceDetectedFrames(r.Context(), p.id, p.revision, frames, reset)
@@ -108,16 +111,17 @@ func (a *App) detectComic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (a *App) pageDetectionInfo(ctx context.Context, comicID string, number int) (int64, int, string, error) {
+func (a *App) pageDetectionInfo(ctx context.Context, comicID string, number int) (int64, int, string, string, error) {
 	var pageID int64
 	var revision int
 	var relative string
-	err := a.db.QueryRowContext(ctx, `SELECT id,revision,image_path FROM pages WHERE comic_id=? AND number=?`, comicID, number).Scan(&pageID, &revision, &relative)
+	var direction string
+	err := a.db.QueryRowContext(ctx, `SELECT p.id,p.revision,p.image_path,c.reading_direction FROM pages p JOIN comics c ON c.id=p.comic_id WHERE p.comic_id=? AND p.number=?`, comicID, number).Scan(&pageID, &revision, &relative, &direction)
 	if err != nil {
-		return 0, 0, "", err
+		return 0, 0, "", "", err
 	}
 	path, err := a.safeStoredPath(relative)
-	return pageID, revision, path, err
+	return pageID, revision, path, direction, err
 }
 
 func (a *App) safeStoredPath(relative string) (string, error) {
@@ -158,7 +162,9 @@ func (a *App) replaceDetectedFrames(ctx context.Context, pageID int64, expectedR
 			return revision, err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE pages SET revision=revision+1 WHERE id=?`, pageID); err != nil {
+	report := buildDetectionReport(frames)
+	reportJSON, _ := json.Marshal(report)
+	if _, err = tx.ExecContext(ctx, `UPDATE pages SET revision=revision+1,review_status=?,detection_report_json=? WHERE id=?`, reviewStatusForReport(report), reportJSON, pageID); err != nil {
 		return revision, err
 	}
 	return revision + 1, tx.Commit()

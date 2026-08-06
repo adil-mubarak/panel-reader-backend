@@ -11,19 +11,33 @@ interface DragState {
   frame: FocusFrame;
 }
 
-export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }: {
+interface DetectionReport {
+  warnings: string[];
+  panelCount: number;
+  coverage: number;
+  averageConfidence: number;
+}
+
+export function FrameEditor({ image, initialFrames, reviewStatus, detectionReport, onSave, onDetect, onApprove, onExport, onCancel }: {
   image: string;
   initialFrames: FocusFrame[];
+  reviewStatus: string;
+  detectionReport: DetectionReport;
   onSave: (frames: FocusFrame[]) => Promise<void>;
-  onDetect: (reset: boolean) => Promise<void>;
+  onDetect: (reset: boolean) => Promise<FocusFrame[]>;
+  onApprove: (approved: boolean) => Promise<void>;
+  onExport: (format: "yolo" | "coco") => void;
   onCancel: () => void;
 }) {
   const [frames, setFrames] = useState(() => initialFrames.map((frame) => ({ ...frame })));
   const [selected, setSelected] = useState(0);
+  const [selectedFrames, setSelectedFrames] = useState<Set<number>>(() => new Set([0]));
   const [drag, setDrag] = useState<DragState | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [detecting, setDetecting] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [draggedOrder, setDraggedOrder] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
   const [undo, setUndo] = useState<FocusFrame[][]>([]);
   const [redo, setRedo] = useState<FocusFrame[][]>([]);
@@ -110,6 +124,7 @@ export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }
     const offset = (frames.length % 5) * 0.035;
     commit((current) => [...current, defaultFrame(current.length + 1, { x: 0.1 + offset, y: 0.1 + offset })]);
     setSelected(frames.length);
+    setSelectedFrames(new Set([frames.length]));
   }
 
   function addPolygon() {
@@ -124,23 +139,90 @@ export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }
       polygon: [{ x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 }, { x: 0.75, y: 0.45 }, { x: 0.2, y: 0.45 }],
     })]);
     setSelected(frames.length);
+    setSelectedFrames(new Set([frames.length]));
   }
 
   function addFullPage() {
     commit((current) => [...current, defaultFrame(current.length + 1, { name: "Full page", frameType: "full_page", x: 0, y: 0, width: 1, height: 1, paddingPercent: 2, maskOpacity: 0 })]);
     setSelected(frames.length);
+    setSelectedFrames(new Set([frames.length]));
   }
 
   function duplicateFrame() {
     if (!frames[selected]) return;
     commit((current) => [...current, { ...current[selected], id: undefined, name: `${current[selected].name} copy`, order: current.length + 1, source: "manual", polygon: current[selected].polygon.map((point) => ({ ...point })) }]);
     setSelected(frames.length);
+    setSelectedFrames(new Set([frames.length]));
   }
 
   function removeFrame() {
     if (frames.length <= 1) return;
-    commit((current) => current.filter((_, index) => index !== selected).map((frame, index) => ({ ...frame, order: index + 1 })));
-    setSelected((value) => Math.max(0, value - 1));
+    const removing = selectedFrames.size ? selectedFrames : new Set([selected]);
+    if (frames.length - removing.size < 1) return;
+    commit((current) => current.filter((_, index) => !removing.has(index)).map((frame, index) => ({ ...frame, order: index + 1 })));
+    const next = Math.max(0, Math.min(selected, frames.length - removing.size - 1));
+    setSelected(next);
+    setSelectedFrames(new Set([next]));
+  }
+
+  function splitFrame(axis: "horizontal" | "vertical") {
+    const frame = frames[selected];
+    if (!frame || frame.shapeType !== "rectangle") return;
+    const first = { ...frame, id: undefined, name: `${frame.name} A`, source: "manual" as const, confidence: undefined, modelVersion: undefined };
+    const second = { ...frame, id: undefined, name: `${frame.name} B`, source: "manual" as const, confidence: undefined, modelVersion: undefined };
+    if (axis === "horizontal") {
+      first.height = frame.height / 2;
+      second.y = frame.y + frame.height / 2;
+      second.height = frame.height / 2;
+    } else {
+      first.width = frame.width / 2;
+      second.x = frame.x + frame.width / 2;
+      second.width = frame.width / 2;
+    }
+    commit((current) => [...current.slice(0, selected), first, second, ...current.slice(selected + 1)].map((item, index) => ({ ...item, order: index + 1 })));
+    setSelectedFrames(new Set([selected, selected + 1]));
+  }
+
+  function mergeFrames() {
+    const indices = [...selectedFrames].sort((a, b) => a - b);
+    if (indices.length < 2) return;
+    const selectedItems = indices.map((index) => frames[index]);
+    const bounds = selectedItems.map(frameBounds);
+    const left = Math.min(...bounds.map((item) => item.x));
+    const top = Math.min(...bounds.map((item) => item.y));
+    const right = Math.max(...bounds.map((item) => item.x + item.width));
+    const bottom = Math.max(...bounds.map((item) => item.y + item.height));
+    const insertAt = indices[0];
+    const merged = defaultFrame(insertAt + 1, { name: "Merged panel", x: left, y: top, width: right - left, height: bottom - top, source: "manual" });
+    commit((current) => {
+      const remaining = current.filter((_, index) => !selectedFrames.has(index));
+      remaining.splice(insertAt, 0, merged);
+      return remaining.map((frame, index) => ({ ...frame, order: index + 1 }));
+    });
+    setSelected(insertAt);
+    setSelectedFrames(new Set([insertAt]));
+  }
+
+  function toggleSelected(index: number) {
+    setSelected(index);
+    setSelectedFrames((current) => {
+      const next = new Set(current);
+      if (next.has(index) && next.size > 1) next.delete(index); else next.add(index);
+      return next;
+    });
+  }
+
+  function dropOrder(target: number) {
+    if (draggedOrder === null || draggedOrder === target) return;
+    commit((current) => {
+      const next = [...current];
+      const [moved] = next.splice(draggedOrder, 1);
+      next.splice(target, 0, moved);
+      return next.map((frame, index) => ({ ...frame, order: index + 1, source: frame.source === "detected" ? "manual_edited" : frame.source }));
+    });
+    setSelected(target);
+    setSelectedFrames(new Set([target]));
+    setDraggedOrder(null);
   }
 
   function reorder(direction: -1 | 1) {
@@ -217,12 +299,28 @@ export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }
     setDetecting(true);
     setError("");
     try {
-      await onDetect(hasManual);
+      const detected = await onDetect(hasManual);
+      setFrames(detected);
+      setSelected(0);
+      setSelectedFrames(new Set([0]));
       setDirty(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not detect panels.");
     } finally {
       setDetecting(false);
+    }
+  }
+
+  async function approve() {
+    setApproving(true);
+    setError("");
+    try {
+      if (dirty) await save();
+      await onApprove(reviewStatus !== "approved");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update review status.");
+    } finally {
+      setApproving(false);
     }
   }
 
@@ -234,6 +332,9 @@ export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }
         <p>Choose a frame, then drag its center to move it or its corner to resize it. Changes auto-save after you finish editing.</p>
         <div className="editor-actions">
           <button className="detect-action" disabled={detecting} onClick={() => void detect()}>{detecting ? "Detecting..." : "Auto detect"}</button>
+          <button disabled={active?.shapeType !== "rectangle"} onClick={() => splitFrame("horizontal")}>Split ↕</button>
+          <button disabled={active?.shapeType !== "rectangle"} onClick={() => splitFrame("vertical")}>Split ↔</button>
+          <button disabled={selectedFrames.size < 2} onClick={mergeFrames}>Merge</button>
           <button onClick={addFrame}>+ Rectangle</button>
           <button onClick={addPolygon}>+ Polygon</button>
           <button onClick={addFullPage}>Full page</button>
@@ -245,8 +346,15 @@ export function FrameEditor({ image, initialFrames, onSave, onDetect, onCancel }
           <button disabled={!redo.length} onClick={redoChange}>Redo</button>
         </div>
         <ol className="frame-list">
-          {frames.map((frame, index) => <li key={index}><button className={selected === index ? "active" : ""} onClick={() => setSelected(index)}>Frame {index + 1}{frame.confidence !== undefined && <small className={frame.confidence < .5 ? "low" : frame.confidence < .85 ? "review" : "likely"}>{Math.round(frame.confidence * 100)}%</small>}</button></li>)}
+          {frames.map((frame, index) => <li draggable key={index} onDragStart={() => setDraggedOrder(index)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropOrder(index)}><button className={selected === index ? "active" : ""} onClick={() => toggleSelected(index)}><span className={`selection-dot${selectedFrames.has(index) ? " selected" : ""}`} />Frame {index + 1}{frame.confidence !== undefined && <small className={frame.confidence < .5 ? "low" : frame.confidence < .85 ? "review" : "likely"}>{Math.round(frame.confidence * 100)}%</small>}</button></li>)}
         </ol>
+        <section className={`review-card status-${reviewStatus}`}>
+          <div><span>Page review</span><strong>{reviewStatus.replaceAll("_", " ")}</strong></div>
+          <dl><div><dt>Coverage</dt><dd>{Math.round((detectionReport.coverage || 0) * 100)}%</dd></div><div><dt>Frames</dt><dd>{detectionReport.panelCount || frames.length}</dd></div></dl>
+          {!!detectionReport.warnings?.length && <ul>{detectionReport.warnings.map((warning) => <li key={warning}>{warning.replaceAll("_", " ")}</li>)}</ul>}
+          <button disabled={approving || dirty} onClick={() => void approve()}>{approving ? "Updating..." : reviewStatus === "approved" ? "Unapprove page" : "Approve page"}</button>
+          <div className="export-actions"><button onClick={() => onExport("yolo")}>Export YOLO</button><button onClick={() => onExport("coco")}>Export COCO</button></div>
+        </section>
         {active && <div className="frame-properties">
           <label>Name<input value={active.name} onChange={(event) => updateActive({ name: event.target.value })} /></label>
           <label>Type<select value={active.frameType} onChange={(event) => updateActive({ frameType: event.target.value as FocusFrame["frameType"] })}><option value="panel">Panel</option><option value="full_page">Full page</option><option value="focus">Focus</option><option value="speech">Speech</option><option value="object">Object</option></select></label>
