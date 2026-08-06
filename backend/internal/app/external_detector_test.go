@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,7 +38,7 @@ func TestExternalDetectorValidResponseAndOrdering(t *testing.T) {
 	if len(frames) != 3 || frames[0].X != 0.1 || frames[1].X != 0.55 || frames[2].Y != 0.55 {
 		t.Fatalf("LTR ordering = %#v", frames)
 	}
-	if frames[0].ShapeType != "polygon" || frames[0].Confidence != 0.9 || frames[0].ModelVersion != "seg-v2" {
+	if frames[0].ShapeType != "polygon" || frames[0].Confidence != 0.9 || !strings.HasPrefix(frames[0].ModelVersion, "hybrid/roboflow/seg-v2;") {
 		t.Fatalf("rich polygon = %#v", frames[0])
 	}
 	for i := range frames {
@@ -61,7 +62,7 @@ func TestExternalDetectorInvalidCoordinateFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frames) != 1 || frames[0].FrameType != "full_page" || frames[0].ModelVersion != "" {
+	if len(frames) != 1 || frames[0].FrameType != "full_page" || frames[0].ModelVersion != "structural/v1" {
 		t.Fatalf("fallback = %#v", frames)
 	}
 }

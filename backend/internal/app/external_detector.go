@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const externalDetectionMaxResponse = 4 << 20
@@ -47,12 +48,154 @@ func (a *App) detectPanelsFile(ctx context.Context, path, comicID string, page i
 	if strings.TrimSpace(a.config.PanelDetectorURL) != "" {
 		frames, err := a.detectPanelsExternal(ctx, path, comicID, page, direction)
 		if err == nil {
-			return postprocessDetectionsWithConfig(frames, direction, a.config, true), nil
+			ai := postprocessDetectionsWithConfig(frames, direction, a.config, true)
+			structural, structuralErr := detectPanelsFile(ctx, path)
+			if structuralErr != nil {
+				a.logger.Warn("structural panel detection failed after external success", "comic_id", comicID, "page", page, "error", structuralErr)
+				markDetectionProvenance(ai, "roboflow")
+				return ai, nil
+			}
+			structural = postprocessDetectionsWithConfig(structural, direction, a.config, false)
+			return fuseDetections(ai, structural, direction), nil
 		}
 		a.logger.Warn("external panel detection failed; using Go detector", "comic_id", comicID, "page", page, "error", err)
 	}
 	frames, err := detectPanelsFile(ctx, path)
-	return postprocessDetectionsWithConfig(frames, direction, a.config, false), err
+	frames = postprocessDetectionsWithConfig(frames, direction, a.config, false)
+	frames = conservativeStructuralDetections(frames)
+	markDetectionProvenance(frames, "structural")
+	return frames, err
+}
+
+func markDetectionProvenance(frames []Panel, detector string) {
+	for i := range frames {
+		if detector == "roboflow" && strings.HasPrefix(frames[i].ModelVersion, "roboflow/") {
+			continue
+		}
+		if detector == "roboflow" && frames[i].ModelVersion != "" {
+			frames[i].ModelVersion = "roboflow/" + frames[i].ModelVersion
+		} else {
+			frames[i].ModelVersion = detector + "/v1"
+		}
+	}
+}
+
+func fuseDetections(ai, structural []Panel, direction string) []Panel {
+	aiCount, structuralCount := len(ai), len(structural)
+	markDetectionProvenance(ai, "roboflow")
+	markDetectionProvenance(structural, "structural")
+	if len(ai) == 0 {
+		filtered := conservativeStructuralDetections(structural)
+		markDetectionProvenance(filtered, "structural")
+		return finalizeHybridDetections(filtered, direction, aiCount, structuralCount)
+	}
+	if len(ai) >= 2 && len(structural) == 1 && structural[0].FrameType == "full_page" {
+		return finalizeHybridDetections(ai, direction, aiCount, structuralCount)
+	}
+
+	result := append([]Panel(nil), ai...)
+	used := make([]bool, len(structural))
+	for aiIndex := len(result) - 1; aiIndex >= 0; aiIndex-- {
+		parts := make([]int, 0, 4)
+		covered := 0.0
+		for si, candidate := range structural {
+			inter := intersectionArea(candidate, result[aiIndex])
+			if structuralRecoveryCandidate(candidate) && inter/frameArea(candidate) >= .9 {
+				parts = append(parts, si)
+				covered += inter
+			}
+		}
+		if len(parts) < 2 || covered/frameArea(result[aiIndex]) < .55 || !nonOverlappingStructural(parts, structural) {
+			continue
+		}
+		replacement := make([]Panel, 0, len(result)-1+len(parts))
+		replacement = append(replacement, result[:aiIndex]...)
+		for _, si := range parts {
+			used[si] = true
+			structural[si].ModelVersion = "hybrid/structural-v1"
+			replacement = append(replacement, structural[si])
+		}
+		replacement = append(replacement, result[aiIndex+1:]...)
+		result = replacement
+	}
+
+	for si, candidate := range structural {
+		if used[si] || !structuralRecoveryCandidate(candidate) || frameArea(candidate) > .8 {
+			continue
+		}
+		add := true
+		for _, existing := range result {
+			inter := intersectionArea(candidate, existing)
+			union := frameArea(candidate) + frameArea(existing) - inter
+			if inter/frameArea(candidate) >= .35 || union > 0 && inter/union >= .2 {
+				add = false
+				break
+			}
+		}
+		if add {
+			candidate.ModelVersion = "hybrid/structural-v1"
+			result = append(result, candidate)
+		}
+	}
+	return finalizeHybridDetections(result, direction, aiCount, structuralCount)
+}
+
+func structuralRecoveryCandidate(candidate Panel) bool {
+	return candidate.FrameType != "full_page" && candidate.Width >= .08 && candidate.Height >= .055 &&
+		frameArea(candidate) >= .005 && candidate.Confidence >= .35
+}
+
+func conservativeStructuralDetections(frames []Panel) []Panel {
+	if len(frames) == 1 && frames[0].FrameType == "full_page" {
+		return frames
+	}
+	filtered := frames[:0]
+	for _, candidate := range frames {
+		if structuralRecoveryCandidate(candidate) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) == 0 {
+		return fullPageDetection()
+	}
+	return filtered
+}
+
+func finalizeHybridDetections(frames []Panel, direction string, aiCount, structuralCount int) []Panel {
+	recovered := 0
+	for i := range frames {
+		if strings.HasPrefix(frames[i].ModelVersion, "hybrid/structural-") {
+			recovered++
+		}
+	}
+	metadata := fmt.Sprintf(";aiCandidates=%d;structuralCandidates=%d;recoveredPanels=%d", aiCount, structuralCount, recovered)
+	for i := range frames {
+		if !strings.HasPrefix(frames[i].ModelVersion, "hybrid/") {
+			frames[i].ModelVersion = "hybrid/" + frames[i].ModelVersion
+		}
+		maxVersionLength := 200 - len(metadata)
+		if len(frames[i].ModelVersion) > maxVersionLength {
+			frames[i].ModelVersion = frames[i].ModelVersion[:maxVersionLength]
+			for !utf8.ValidString(frames[i].ModelVersion) {
+				frames[i].ModelVersion = frames[i].ModelVersion[:len(frames[i].ModelVersion)-1]
+			}
+		}
+		frames[i].ModelVersion += metadata
+	}
+	sortDetectedPanels(frames, direction)
+	return frames
+}
+
+func nonOverlappingStructural(indices []int, frames []Panel) bool {
+	for i, index := range indices {
+		for _, other := range indices[:i] {
+			inter := intersectionArea(frames[index], frames[other])
+			if inter/math.Min(frameArea(frames[index]), frameArea(frames[other])) > .15 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (a *App) detectPanelsExternal(ctx context.Context, path, comicID string, page int, direction string) ([]Panel, error) {

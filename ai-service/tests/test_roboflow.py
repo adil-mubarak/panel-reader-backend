@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from app.main import (
     BoundingBox,
     DetectedPanel,
+    DetectionRequest,
     DetectionResponse,
     Point,
     convert_roboflow_result,
@@ -17,6 +18,15 @@ from app.main import (
 
 
 class RoboflowConversionTests(unittest.TestCase):
+    def test_detection_request_accepts_vertical_reading_direction(self):
+        request = DetectionRequest(
+            comicId="comic-1",
+            page=1,
+            imagePath="/data/comics/page.jpg",
+            readingDirection="vertical",
+        )
+        self.assertEqual(request.readingDirection, "vertical")
+
     def test_converts_center_box_and_filters_cover(self):
         result = {
             "image": {"width": 1000, "height": 2000},
@@ -84,6 +94,25 @@ class RoboflowConversionTests(unittest.TestCase):
         )
         self.assertEqual(len(refined.panels[0].polygon), 3)
         self.assertEqual(refined.modelVersion, "boxes+masks")
+
+    def test_hybrid_includes_unmatched_valid_mask(self):
+        box = DetectedPanel(confidence=.95, polygon=[], boundingBox=BoundingBox(x=.1, y=.1, width=.2, height=.2))
+        mask = DetectedPanel(confidence=.9, polygon=[Point(x=.6, y=.6), Point(x=.8, y=.6), Point(x=.8, y=.8)], boundingBox=BoundingBox(x=.6, y=.6, width=.2, height=.2))
+        refined = refine_detections(
+            DetectionResponse(width=100, height=100, modelVersion="boxes", panels=[box]),
+            DetectionResponse(width=100, height=100, modelVersion="masks", panels=[mask]),
+        )
+        self.assertEqual(len(refined.panels), 2)
+        self.assertEqual(refined.panels[1], mask)
+
+    def test_hybrid_suppresses_duplicate_unmatched_masks(self):
+        first = DetectedPanel(confidence=.9, polygon=[Point(x=.5, y=.5), Point(x=.8, y=.5), Point(x=.8, y=.8)], boundingBox=BoundingBox(x=.5, y=.5, width=.3, height=.3))
+        duplicate = DetectedPanel(confidence=.8, polygon=[Point(x=.51, y=.51), Point(x=.81, y=.51), Point(x=.81, y=.81)], boundingBox=BoundingBox(x=.51, y=.51, width=.3, height=.3))
+        refined = refine_detections(
+            DetectionResponse(width=100, height=100, modelVersion="boxes", panels=[]),
+            DetectionResponse(width=100, height=100, modelVersion="masks", panels=[first, duplicate]),
+        )
+        self.assertEqual(refined.panels, [first])
 
 
 if __name__ == "__main__":

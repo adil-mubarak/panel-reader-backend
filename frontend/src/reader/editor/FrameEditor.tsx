@@ -16,6 +16,9 @@ interface DetectionReport {
   panelCount: number;
   coverage: number;
   averageConfidence: number;
+  aiCandidateCount?: number;
+  structuralCandidateCount?: number;
+  recoveredPanelCount?: number;
 }
 
 export function FrameEditor({ image, initialFrames, reviewStatus, detectionReport, onSave, onDetect, onApprove, onExport, onCancel }: {
@@ -350,7 +353,7 @@ export function FrameEditor({ image, initialFrames, reviewStatus, detectionRepor
         </ol>
         <section className={`review-card status-${reviewStatus}`}>
           <div><span>Page review</span><strong>{reviewStatus.replaceAll("_", " ")}</strong></div>
-          <dl><div><dt>Coverage</dt><dd>{Math.round((detectionReport.coverage || 0) * 100)}%</dd></div><div><dt>Frames</dt><dd>{detectionReport.panelCount || frames.length}</dd></div></dl>
+          <dl><div><dt>Coverage</dt><dd>{Math.round((detectionReport.coverage || 0) * 100)}%</dd></div><div><dt>Frames</dt><dd>{detectionReport.panelCount || frames.length}</dd></div>{detectionReport.aiCandidateCount !== undefined && <div><dt>AI</dt><dd>{detectionReport.aiCandidateCount}</dd></div>}{detectionReport.structuralCandidateCount !== undefined && <div><dt>Structure</dt><dd>{detectionReport.structuralCandidateCount}</dd></div>}{!!detectionReport.recoveredPanelCount && <div><dt>Recovered</dt><dd>+{detectionReport.recoveredPanelCount}</dd></div>}</dl>
           {!!detectionReport.warnings?.length && <ul>{detectionReport.warnings.map((warning) => <li key={warning}>{warning.replaceAll("_", " ")}</li>)}</ul>}
           <button disabled={approving || dirty} onClick={() => void approve()}>{approving ? "Updating..." : reviewStatus === "approved" ? "Unapprove page" : "Approve page"}</button>
           <div className="export-actions"><button onClick={() => onExport("yolo")}>Export YOLO</button><button onClick={() => onExport("coco")}>Export COCO</button></div>
@@ -363,7 +366,7 @@ export function FrameEditor({ image, initialFrames, reviewStatus, detectionRepor
           <label>Mask <output>{Math.round(active.maskOpacity * 100)}%</output><input type="range" min="0" max="1" step="0.05" value={active.maskOpacity} onChange={(event) => updateActive({ maskOpacity: Number(event.target.value) })} /></label>
           <label>Transition <output>{active.transitionDurationMs} ms</output><input type="range" min="0" max="1200" step="25" value={active.transitionDurationMs} onChange={(event) => updateActive({ transitionDurationMs: Number(event.target.value) })} /></label>
           <label className="check-label"><input type="checkbox" checked={active.isEnabled} onChange={(event) => updateActive({ isEnabled: event.target.checked })} /> Enabled</label>
-          {active.confidence !== undefined && <div className="detection-confidence"><span>AI confidence</span><strong>{Math.round(active.confidence * 100)}%</strong><small>{active.confidence >= .85 ? "Likely correct" : active.confidence >= .5 ? "Review recommended" : "Low confidence"}{active.modelVersion ? ` · ${active.modelVersion}` : ""}</small></div>}
+          {(active.confidence !== undefined || active.modelVersion) && <div className="detection-confidence"><span>Detection source</span><strong>{detectorLabel(active.modelVersion)}</strong><small>{active.confidence !== undefined ? `${Math.round(active.confidence * 100)}% confidence - ${active.confidence >= .85 ? "likely correct" : active.confidence >= .5 ? "review recommended" : "low confidence"}` : "Structural panel candidate"}</small></div>}
           {active.shapeType === "polygon" && <fieldset className="polygon-points"><legend>Polygon points</legend>{active.polygon.map((point, index) => <div key={index}><span>{index + 1}</span><input aria-label={`Point ${index + 1} X`} type="number" min="0" max="1" step="0.01" value={point.x} onChange={(event) => updatePoint(index, "x", Number(event.target.value))} /><input aria-label={`Point ${index + 1} Y`} type="number" min="0" max="1" step="0.01" value={point.y} onChange={(event) => updatePoint(index, "y", Number(event.target.value))} /><button disabled={active.polygon.length <= 3} onClick={() => removePoint(index)}>×</button></div>)}<button onClick={addPoint}>+ Point</button></fieldset>}
         </div>}
         <div className="save-status">{saving ? "Saving..." : dirty ? "Unsaved changes" : "Saved"}</div>
@@ -410,4 +413,11 @@ export function FrameEditor({ image, initialFrames, reviewStatus, detectionRepor
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function detectorLabel(version?: string) {
+  if (version?.includes("hybrid/structural")) return "Hybrid recovery";
+  if (version?.includes("roboflow")) return "AI detection";
+  if (version?.includes("structural")) return "Structural detection";
+  return "Detected";
 }
