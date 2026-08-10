@@ -20,6 +20,7 @@ func main() {
 	storageRoot := envOr("PANEL_READER_STORAGE", "../storage")
 	databasePath := envOr("PANEL_READER_DATABASE", filepath.Join(storageRoot, "panel-reader.db"))
 	detectorTimeout := envDuration("PANEL_READER_AI_TIMEOUT", 30*time.Second, logger)
+	importTimeout := envDuration("PANEL_READER_IMPORT_TIMEOUT", 2*time.Hour, logger)
 
 	application, err := app.New(app.Config{
 		StorageRoot:                    storageRoot,
@@ -30,6 +31,7 @@ func main() {
 		MaxFile:                        100 << 20,
 		PanelDetectorURL:               os.Getenv("PANEL_READER_AI_URL"),
 		PanelDetectorTimeout:           detectorTimeout,
+		ImportTimeout:                  importTimeout,
 		PanelDetectorRoot:              os.Getenv("PANEL_READER_AI_STORAGE_ROOT"),
 		DetectionConfidenceThreshold:   envFloat("PANEL_READER_DETECTION_CONFIDENCE", .25, logger),
 		DetectionReliableConfidence:    envFloat("PANEL_READER_DETECTION_RELIABLE_CONFIDENCE", .55, logger),

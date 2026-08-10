@@ -39,6 +39,7 @@ type Config struct {
 	PanelDetectorURL               string
 	PanelDetectorTimeout           time.Duration
 	PanelDetectorRoot              string
+	ImportTimeout                  time.Duration
 	DetectionConfidenceThreshold   float64
 	DetectionReliableConfidence    float64
 	DetectionMinCoverage           float64
@@ -146,6 +147,9 @@ func New(config Config, logger *slog.Logger) (*App, error) {
 	db.SetMaxOpenConns(1)
 	if config.PanelDetectorTimeout <= 0 {
 		config.PanelDetectorTimeout = 30 * time.Second
+	}
+	if config.ImportTimeout <= 0 {
+		config.ImportTimeout = 2 * time.Hour
 	}
 	if config.DetectionConfidenceThreshold <= 0 {
 		config.DetectionConfidenceThreshold = .25
@@ -450,9 +454,10 @@ func (a *App) uploadComic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) processComic(id, extension, uploadPath, direction, contentType string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), a.config.ImportTimeout)
 	defer cancel()
 	defer os.Remove(uploadPath)
+	currentPhase := "preparing the comic"
 	tmpDir, err := os.MkdirTemp(filepath.Join(a.config.StorageRoot, "tmp"), "comic-*")
 	if err != nil {
 		a.failComic(id, err)
@@ -460,6 +465,11 @@ func (a *App) processComic(id, extension, uploadPath, direction, contentType str
 	}
 	defer os.RemoveAll(tmpDir)
 	progress := func(value int, phase string) {
+		phase = strings.TrimSpace(phase)
+		if phase != "" {
+			// Keep the latest phase for a useful error if the overall import deadline expires.
+			currentPhase = strings.ToLower(phase[:1]) + phase[1:]
+		}
 		if value < 0 {
 			value = 0
 		}
@@ -473,6 +483,9 @@ func (a *App) processComic(id, extension, uploadPath, direction, contentType str
 	progress(1, "extracting")
 	pages, err := a.importPages(ctx, extension, uploadPath, filepath.Join(tmpDir, "pages"), id, progress)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = importDeadlineError(currentPhase)
+		}
 		a.failComic(id, err)
 		return
 	}
@@ -490,6 +503,9 @@ func (a *App) processComic(id, extension, uploadPath, direction, contentType str
 		}
 	}
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = importDeadlineError(currentPhase)
+		}
 		a.failComic(id, err)
 		return
 	}
@@ -531,6 +547,14 @@ func (a *App) processComic(id, extension, uploadPath, direction, contentType str
 		os.RemoveAll(finalDir)
 		a.failComic(id, errors.New("Could not save comic metadata."))
 	}
+}
+
+func importDeadlineError(phase string) error {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		phase = "processing the comic"
+	}
+	return fmt.Errorf("Import exceeded the processing time limit while %s.", phase)
 }
 
 func (a *App) failComic(id string, cause error) {

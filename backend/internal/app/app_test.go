@@ -38,6 +38,41 @@ func TestNaturalLess(t *testing.T) {
 	}
 }
 
+func TestImportTimeoutConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "default", want: 2 * time.Hour},
+		{name: "configured", configured: 45 * time.Minute, want: 45 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := t.TempDir()
+			a, err := New(Config{
+				StorageRoot:   storage,
+				DatabasePath:  filepath.Join(storage, "test.db"),
+				ImportTimeout: test.configured,
+			}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			if a.config.ImportTimeout != test.want {
+				t.Fatalf("ImportTimeout = %v, want %v", a.config.ImportTimeout, test.want)
+			}
+		})
+	}
+}
+
+func TestImportDeadlineErrorIncludesPhase(t *testing.T) {
+	got := importDeadlineError("detecting panels on page 47 of 120").Error()
+	want := "Import exceeded the processing time limit while detecting panels on page 47 of 120."
+	if got != want {
+		t.Fatalf("importDeadlineError() = %q, want %q", got, want)
+	}
+}
+
 func TestSafeArchivePath(t *testing.T) {
 	for _, path := range []string{"../page.jpg", "/page.jpg", "pages/../../page.jpg", `pages\page.jpg`, ""} {
 		if _, ok := safeArchivePath(path); ok {
